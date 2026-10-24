@@ -1,5 +1,7 @@
 ================================================================
-  DIRECT CONTROL FOR KENSHI               v1.5.0
+  KENSHI DIRECT CONTROL ENHANCED          v1.0.0
+  Based on Direct Control for Kenshi v1.5.0 by smokefoolius
+  Enhanced fork maintained by MstrxDev | GNU GPL v3.0
 ================================================================
 
 Full WASD movement for your selected character. Press V, move with
@@ -15,16 +17,39 @@ is yours - timed presses on top of Kenshi's own skill system. Point
 at an enemy and your character fights them; watch for the glint on
 an incoming weapon and block or dodge it.
 
-Built for precise, hands-on control during combat, retreats,
-ambushes, city navigation, and immersive exploration - without
-losing any of Kenshi's charm.
+Direct Control is useful for combat, travel, and exploring
+Kenshi without relying entirely on point-and-click movement.
+
+ENHANCED EDITION (v1.0.0)
+  This fork keeps the original movement, first-person and
+  over-the-shoulder views, and manual combat. It adds automatic
+  camera following, F10 mouse-look for the normal camera,
+  optional curved steering, and a fix for inverted camera angles.
+
+  The normal-camera pitch correction, repeated 360-degree yaw,
+  Alt cursor release, F10 reentry, and F6 automatic following
+  passed in-game tests on Kenshi 1.0.65 GOG.
+
+  Original mod: smokefoolius (Direct Control v1.5.0)
+  Enhanced fork: MstrxDev (v1.0.0)
+  License: GNU General Public License v3.0 (GPL-3.0).
 
 
-LINKS
------
-  Steam Workshop : https://steamcommunity.com/sharedfiles/filedetails/?id=3737240806
-  Nexus Mods     : https://www.nexusmods.com/kenshi/mods/2017?tab=description
-  GitHub         : https://github.com/smokefoolius/Kenshi-Direct-Control
+DOWNLOADS AND LINKS
+-------------------
+  Enhanced release ZIP:
+    https://github.com/MstrxDev/Kenshi-Direct-Control-Enhanced/releases
+
+  Enhanced source repository:
+    https://github.com/MstrxDev/Kenshi-Direct-Control-Enhanced
+
+  Original project by smokefoolius:
+    GitHub         : https://github.com/smokefoolius/Kenshi-Direct-Control
+    Steam Workshop : https://steamcommunity.com/sharedfiles/filedetails/?id=3737240806
+    Nexus Mods     : https://www.nexusmods.com/kenshi/mods/2017
+
+  The original Workshop/Nexus downloads are upstream releases;
+  they may not include the enhancements described here.
 
 
 CONTROLS
@@ -42,7 +67,7 @@ CONTROLS
   F6         Toggle automatic camera follow (configured modes only)
   F10        Toggle mouse-look for the NORMAL V-only camera
   SHIFT+C    Toggle sneak (first person or third-person camera)
-  ALT        Hold for a free mouse cursor in first / third person
+  ALT        Hold to free the cursor in mouse-look, FP or OTS
 
   Z          Manual combat on / off
   E          Attack  - one press, one swing at the enemy you point at
@@ -65,6 +90,12 @@ OPTIONAL STEERING AND NORMAL MOUSE-LOOK
   [Settings]
   SteeringMode = false
   SteeringTurnSpeed = 90.0
+  NormalAutoAlign = false
+  NormalAutoAlignSpeed = 4.0
+  NormalManualOverrideMs = 600
+  OtsAutoAlign = false
+  OtsAutoAlignSpeed = 4.0
+  OtsMouseOverrideMs = 600
   NormalMouseLook = false
   NormalMouseLookSensitivity = 1.0
   CameraDiagnostics = false
@@ -74,8 +105,8 @@ OPTIONAL STEERING AND NORMAL MOUSE-LOOK
   (10-360). First person retains its existing movement. Crawl, furniture
   and slave-order locomotion retain their established movement paths.
   A/D alone and W+A/D move forward along the turning character heading.
-  They use the existing movement/speed/animation/collision path. Actual
-  curved movement and backward animations still require in-game validation.
+  They use the existing movement/speed/animation/collision path.
+  Movement and animations can vary with character state and terrain.
 
   Set NormalAutoAlign=true and/or OtsAutoAlign=true for automatic follow
   in each view. F6 is a session master; it respects these separate settings.
@@ -91,7 +122,8 @@ OPTIONAL STEERING AND NORMAL MOUSE-LOOK
   Invalid/inverted orientation is repaired on capture, after native update
   and on F10/V exit. Native +Z optics require positive center pitch down.
   ALT/reentry discards the first mouse sample and reads the actual rig pose.
-  Normal F10 activation is confirmed; this pitch correction needs playtesting.
+  F10 capture, pitch limits, full yaw orbits, Alt release and upright
+  recovery passed in-game testing on Kenshi 1.0.65 GOG.
   FP/OTS are separate.
   Shares OTS/FP raw input and cursor fallback; F6 OFF does not disable look.
 
@@ -101,7 +133,8 @@ OPTIONAL STEERING AND NORMAL MOUSE-LOOK
   INI tuning needs a restart; the runtime toggles and Options key rebinds
   do not. Runtime toggle states are not saved across game restarts.
 
-  The reported NormalAutoAlign failure is NOT verified fixed in-game.
+  The previous NormalAutoAlign activation failure is fixed and
+  automatic following passed in-game testing on Kenshi 1.0.65 GOG.
   The logged 0x400 was an unsupported initialised/terrainLoaded readiness
   check (also combined with the valid free-camera check). A read-only live
   snapshot found initialised=1, terrainLoaded=0, freeCameraMode=0, identifying
@@ -111,7 +144,7 @@ OPTIONAL STEERING AND NORMAL MOUSE-LOOK
   CameraDiagnostics=true logs loaded values and camera state at most
   once/second to RE_Kenshi_log.txt, independently of VerboseLog. See
   README.md for collection steps, gate-mask meanings, regression tests,
-  source-level fixes and the remaining runtime playtest checklist.
+  source changes, and additional checks.
   dc_normal_pitch adds mouse/native input, absolute clamp, derived orientation,
   world-up/roll and latched recovery flags at most once per second. Native
   rig evidence and pitch checks: tests/normal_camera_native_rig.md.
@@ -121,7 +154,7 @@ FEATURES
 --------
   Instant movement override
     WASD immediately cancels click-to-move destinations and
-    overrides combat AI pathing. No startup delay, crisp stop on
+    overrides combat AI pathing. No startup delay, stops on
     release, indoors and out. Movement, speed and camera now carry
     straight through the loading of new map areas.
 
@@ -431,7 +464,9 @@ REQUIREMENTS
 
 COMPATIBILITY & NOTES
 ---------------------
-  - Tested with RE_Kenshi 0.3.5 (Kenshi 1.0.65). No game files
+  - Enhanced camera controls tested with RE_Kenshi 0.3.5 on
+    Kenshi 1.0.65 GOG. Steam compatibility of these enhancements
+    has not been independently verified. No game files
     are modified on disk, so it is safe alongside large mod lists
     and most combat, AI, and faction mods.
   - The mod includes a copy of the character shader
@@ -470,5 +505,8 @@ COMPATIBILITY & NOTES
     back).
 
 ================================================================
+  Original Direct Control by smokefoolius (v1.5.0).
+  Enhanced edition maintained by MstrxDev (v1.0.0).
   Developed as "WASDCombatPlugin" using the RE_Kenshi SDK.
+  Licensed under GPL-3.0; see LICENSE.
 ================================================================

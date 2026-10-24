@@ -86,14 +86,14 @@ Build with:
 git diff --check
 ```
 
-No game was started or controlled, no DLL was deployed to Kenshi, and no commit
-was made for this correction. Controller tests cannot confirm actual Ogre scene
-scheduling, rendering or collision behavior. The user has confirmed the earlier
-normal F10 activation fix; the pitch correction has **not** been playtested.
+At the time of this investigation, no game was started and the DLL had not
+been deployed. Controller tests alone cannot confirm rendering or collision.
+The corrected camera was subsequently tested in Kenshi 1.0.65 GOG. Pitch limits,
+repeated horizontal orbits, F10 toggling, Alt release/recapture, upright camera
+recovery, and F6 automatic camera following all passed.
 
-Required playtest: repeated fast mouse-up/down and full orbits with F6 off/on;
-ALT selection and recapture; F10 off/on; V, OTS and FP transitions; native tilt
-keys; wheel zoom, tracking and terrain/interior collision; pause/UI/focus changes;
-save loading; recovery of an already-invalid view. Enable CameraDiagnostics to
-collect dc_normal_pitch (radians, recovery bits 1=pre, 2=post/final, 4=release,
-8=inversion/nonfinite detection) with actual derived direction/up/quaternion.
+Additional tests on other setups should cover V/OTS/FP transitions, native tilt
+keys, wheel zoom, terrain and interior collision, UI/focus changes, and save
+loading. CameraDiagnostics records dc_normal_pitch (radians, recovery bits
+1=pre, 2=post/final, 4=release, 8=inversion/nonfinite detection) with derived
+direction, up vector, and quaternion.
