@@ -1,4 +1,10 @@
-# Direct Control for Kenshi
+# Kenshi Direct Control Enhanced
+
+**Enhanced fork of [Direct Control for Kenshi](https://github.com/smokefoolius/Kenshi-Direct-Control), originally developed by smokefoolius. Maintained by MstrxDev.**
+
+This edition preserves the original WASD movement, first-person and over-the-shoulder cameras, and manual combat system while adding automatic camera alignment, normal-camera mouse-look, optional curved steering, and camera orientation safeguards.
+
+The original developer retains credit for the base project. This fork and its modifications remain distributed under GPL-3.0.
 
 **Full WASD movement, true first- and third-person views, and hands-on manual combat for Kenshi.**
 
@@ -6,15 +12,19 @@ Press `V`, move with WASD, and your character responds instantly — overriding 
 
 Built for precise, hands-on control during combat, retreats, ambushes, city navigation, and immersive exploration — without losing any of Kenshi's charm.
 
-**Current version: v1.5.0 — Manual Combat**
+**Enhanced fork release: v1.0.0** (based on the original v1.5.0 Manual Combat release)
 
 ## Downloads
 
-| | |
-|---|---|
-| Steam Workshop | https://steamcommunity.com/sharedfiles/filedetails/?id=3737240806 |
-| Nexus Mods | https://www.nexusmods.com/kenshi/mods/2017 |
+**Enhanced edition:** [Download the latest GitHub Release](https://github.com/MstrxDev/Kenshi-Direct-Control-Enhanced/releases)
 
+Download the release ZIP for this enhanced fork. The original Steam Workshop and Nexus Mods listings below belong to the upstream project and may not include these enhancements.
+
+**Original project by smokefoolius:**
+
+- [Original GitHub repository](https://github.com/smokefoolius/Kenshi-Direct-Control)
+- [Steam Workshop](https://steamcommunity.com/sharedfiles/filedetails/?id=3737240806)
+- [Nexus Mods](https://www.nexusmods.com/kenshi/mods/2017)
 ## Controls
 
 | Key | Action |
@@ -28,7 +38,9 @@ Built for precise, hands-on control during combat, retreats, ambushes, city navi
 | `Ctrl` | Toggle the third-person action camera |
 | `H` | Swap the third-person camera to the other shoulder |
 | `Shift`+`C` | Toggle sneak (first person or third-person camera) |
-| `Alt` (hold) | Free mouse cursor in first / third person |
+| `F6` | Toggle automatic camera following (requires mode-specific INI setting) |
+| `F10` | Toggle mouse-look in normal V-only camera mode |
+| `Alt` (hold) | Temporarily release the cursor while mouse-look is active |
 | `Z` | Manual combat on / off |
 | `E` | Attack — one press, one swing at the enemy you point at |
 | `F` | Block — hold to guard; tap as a hit lands for a perfect block |
@@ -200,9 +212,9 @@ mouse consumers; the normal mode does not consume their accumulator samples.
 
 ### Normal mouse-look pitch correction
 
-Normal F10 activation and mouse response have been confirmed in-game. The
-subsequent inverted/under-ground pitch bug is corrected in source and regression
-tests; **this pitch correction still needs an in-game playtest**.
+The corrected normal-camera mouse-look has now been successfully tested in-game on **Kenshi 1.0.65 GOG**. Manual playtests passed for vertical pitch limits, repeated horizontal 360-degree rotations, F10 capture and release, Alt cursor interactions, upright camera recovery, and F6 automatic camera following.
+
+The previous upside-down camera bug was reproduced before the correction and did not recur during these tests.
 
 The native attached rig is `center -> lens node -> Ogre camera`. The center owns
 both world-Y yaw and local-X pitch. The lens sits on local **-Z**, while the
