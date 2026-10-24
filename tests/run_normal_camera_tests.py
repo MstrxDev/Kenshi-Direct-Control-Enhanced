@@ -25,8 +25,10 @@ state = source.split("// Normal V-only camera:", 1)[1].split(
     "static void normalResetAutoAlign()", 1)[0]
 state = state[state.index("static bool"):]
 names = ["otsWrapYaw", "normalResetAutoAlign", "normalMovementReferenceYaw",
-         "computeWASDDirection", "normalCameraYaw", "normalAutoAlignBeforeUpdate",
-         "normalAutoAlignAfterUpdate"]
+         "computeWASDDirection", "steeringAdvanceYaw", "normalCameraYaw", "normalCameraGates",
+         "normalLookSmooth", "normalLookPitchDelta", "normalReleaseMouseLook",
+         "normalMouseLookBeforeUpdate", "normalAutoAlignBeforeUpdate",
+         "normalAutoAlignAfterUpdate", "cameraToggleRequests", "steeringFrame", "readCameraFloat"]
 (OUT / "normal_camera_under_test.h").write_text(
     state + "\n" + "\n\n".join(function(name) for name in names), encoding="utf-8")
 
@@ -46,8 +48,21 @@ subprocess.run([str(OUT / "normal_camera_tests.exe")], cwd=OUT, check=True)
 # Both shipped and generated defaults must stay opt-in, with the same key names.
 ini = (ROOT / "WASDCombatPlugin.ini").read_text(encoding="utf-8-sig")
 for name, default in [("NormalAutoAlign", "false"), ("NormalAutoAlignSpeed", "4.0"),
-                      ("NormalManualOverrideMs", "600")]:
+                      ("NormalManualOverrideMs", "600"), ("SteeringMode", "false"),
+                      ("SteeringTurnSpeed", "90.0"), ("NormalMouseLook", "false"),
+                      ("NormalMouseLookSensitivity", "1.0"), ("CameraDiagnostics", "false")]:
     assert re.search(r"^" + name + r"\s*=\s*" + re.escape(default) + r"$", ini, re.M)
     assert '"' + name + ' = ' + default + r'\r\n"' in source
-    assert '"Settings", "' + name + '", "' + default + '"' in source
+    assert ('"Settings", "' + name + '", "' + default + '"' in source
+            or 'readCameraFloat(path, "' + name + '", "' + default + '"' in source)
+for name, default in [("ToggleAutoCamera", "F6"), ("ToggleNormalMouseLook", "F10")]:
+    assert re.search(r"^" + name + r"\s*=\s*" + default + r"$", ini, re.M)
+    assert '"' + name + ' = ' + default + r'\r\n"' in source
+# Existing layout migration must remain opt-in once per old file.
+assert '"KeyLayout", 1, path) < 2' in source
+# Native mouse rotate is suppressed only over the normal captured update.
+hook = source.split("static void cameraUpdate_hook(", 1)[1].split("// ANY open UI", 1)[0]
+assert hook.index("normalMouseLookBeforeUpdate(") < hook.index("normalAutoAlignBeforeUpdate(") < hook.index("s_cameraUpdateOrig(thisptr")
+assert "if (key) key->rotate = false" in hook
+assert "if (normalCapture && key) key->rotate = savedRotate" in hook
 print("PASS: shipped defaults, generated defaults and INI load keys agree")

@@ -341,6 +341,28 @@ static void otsResetAutoAlign()
 
 // Normal V-only camera: independent state; never borrows the detached OTS yaw.
 static bool             s_normalAutoAlign = false;
+static bool             s_autoCameraEnabled = true; // session master; mode settings remain independent
+static volatile LONG    s_autoCameraToggleRequest = 0;
+static volatile LONG    s_normalLookToggleRequest = 0;
+static bool             s_steeringMode = false;
+static float            s_steeringTurnSpeed = 90.0f; // degrees/real second
+static bool             s_steeringValid = false;
+static bool             s_steeringLegacyMovement = false; // crawl/furniture/order-driven exceptions
+static Character*       s_steeringAnchor = nullptr; // identities only
+static CharMovement*    s_steeringMovement = nullptr;
+static float            s_steeringYaw = 0.0f;       // never copied from camera yaw
+static bool             s_steeringIntent = false;
+static bool             s_normalMouseLook = false;
+static float            s_normalMouseSensitivity = 1.0f;
+static bool             s_normalLookCaptured = false;
+static bool             s_normalLookMoved = false;
+static bool             s_normalLookRaw = false;
+static volatile LONG    s_cameraFocusSerial = 0;
+static LONG             s_normalLookFocusSerial = 0;
+static POINT            s_normalLookSavedCursor;
+static CameraClass*     s_normalLookCamera = nullptr; // identity only
+static Character*       s_normalLookAnchor = nullptr;
+static float            s_normalLookYawPending = 0.0f, s_normalLookPitchPending = 0.0f;
 static float            s_normalAutoAlignSpeed = 4.0f;
 static DWORD            s_normalManualOverrideMs = 600;
 static CameraClass*     s_normalAlignCamera = nullptr;
@@ -352,6 +374,12 @@ static LONG             s_normalMoveRefGesture = 0;
 static Ogre::Vector3    s_normalAlignLastPos(0.0f, 0.0f, 0.0f);
 static LONGLONG         s_normalAlignLastTick = 0;
 static ULONGLONG        s_normalOverrideUntilMs = 0;
+static bool             s_cameraDiagnostics = false;
+static bool             s_normalManualInput = false;
+static unsigned int     s_normalGate = 0;
+static float            s_normalSampleDt = 0.0f, s_normalSampleSpeed = 0.0f;
+static float            s_normalRequestedYaw = 0.0f, s_normalWrittenYaw = 0.0f;
+static ULONGLONG        s_cameraDiagLastMs = 0;
 
 static void normalResetAutoAlign()
 {
@@ -530,14 +558,14 @@ static void setMode(ControlMode next)
 // is touched — movement, hold, point-click, camera, combat, and XP logic
 // are unchanged.
 // =======================================================================
-enum KeyRole { KR_FORWARD = 0, KR_LEFT, KR_BACK, KR_RIGHT, KR_TOGGLE, KR_SPEED, KR_SELECT, KR_FP, KR_SNEAK, KR_OTS_SHOULDER, KR_BLOCK, KR_DODGE, KR_ATTACK, KR_MANUAL, KR_COUNT };
-static int s_bindVk[KR_COUNT] = { 'W', 'A', 'S', 'D', 'V', 'X', 'G', 'P', 'C', 'H', 'F', 'Q', 'E', 'Z' };  // defaults (v1.5: control G, block F)
+enum KeyRole { KR_FORWARD = 0, KR_LEFT, KR_BACK, KR_RIGHT, KR_TOGGLE, KR_SPEED, KR_SELECT, KR_FP, KR_SNEAK, KR_OTS_SHOULDER, KR_BLOCK, KR_DODGE, KR_ATTACK, KR_MANUAL, KR_AUTO_CAMERA, KR_NORMAL_LOOK, KR_COUNT };
+static int s_bindVk[KR_COUNT] = { 'W', 'A', 'S', 'D', 'V', 'X', 'G', 'P', 'C', 'H', 'F', 'Q', 'E', 'Z', VK_F6, VK_F10 };
 static const char* const KR_INI_KEY[KR_COUNT] =
-    { "MoveForward", "MoveLeft", "MoveBackward", "MoveRight", "ToggleDC", "SpeedCycle", "SelectControl", "FirstPerson", "SneakToggle", "SwapShoulder", "Block", "Dodge", "Attack", "ManualAttack" };
+    { "MoveForward", "MoveLeft", "MoveBackward", "MoveRight", "ToggleDC", "SpeedCycle", "SelectControl", "FirstPerson", "SneakToggle", "SwapShoulder", "Block", "Dodge", "Attack", "ManualAttack", "ToggleAutoCamera", "ToggleNormalMouseLook" };
 static const char* const KR_DEFAULT[KR_COUNT] =
-    { "W", "A", "S", "D", "V", "X", "G", "P", "C", "H", "F", "Q", "E", "Z" };
+    { "W", "A", "S", "D", "V", "X", "G", "P", "C", "H", "F", "Q", "E", "Z", "F6", "F10" };
 static char    s_bindCfgStr[KR_COUNT][32];  // resolved strings for the summary log
-static int     s_uiBindVk[KR_COUNT] = { 'W', 'A', 'S', 'D', 'V', 'X', 'G', 'P', 'C', 'H', 'F', 'Q', 'E', 'Z' };
+static int     s_uiBindVk[KR_COUNT] = { 'W', 'A', 'S', 'D', 'V', 'X', 'G', 'P', 'C', 'H', 'F', 'Q', 'E', 'Z', VK_F6, VK_F10 };
                                             // options-tab dropdown mirrors of s_bindVk:
                                             // the UI edits these; dcOptionsWatch commits
                                             // changes to s_bindVk + INI.  Seeded from the
@@ -1349,6 +1377,9 @@ static void writeDefaultConfig(const char* path)
         "; every swing is the Attack key.  A \"Manual Attack\" label shows while on.\r\n"
         "Attack          = E\r\n"
         "ManualAttack    = Z\r\n"
+        "; F7 is Kenshi's HUD toggle; F8 is screenshot. Plain F6/F10 are used here.\r\n"
+        "ToggleAutoCamera = F6\r\n"
+        "ToggleNormalMouseLook = F10\r\n"
         "; While manual combat is on, your character fights whoever you point at:\r\n"
         "; the enemy under the mouse cursor, or nearest the crosshair in first person\r\n"
         "; and the CTRL third-person view.  The camera is never moved for it.\r\n"
@@ -1414,6 +1445,16 @@ static void writeDefaultConfig(const char* path)
         "; Turn response per second (0.1-20); manual rotation override ms (0-10000).\r\n"
         "NormalAutoAlignSpeed = 4.0\r\n"
         "NormalManualOverrideMs = 600\r\n"
+        "; Character-relative W/S and A/D steering in normal/OTS (not first person).\r\n"
+        "SteeringMode = false\r\n"
+        "; Degrees per real second (10-360). Restart after editing these settings.\r\n"
+        "SteeringTurnSpeed = 90.0\r\n"
+        "; Startup preference; F10 toggles in normal V-only gameplay. ALT frees cursor.\r\n"
+        "NormalMouseLook = false\r\n"
+        "; Relative mouse sensitivity (0.1-5); native wheel/tracking/terrain stay active.\r\n"
+        "NormalMouseLookSensitivity = 1.0\r\n"
+        "; Camera-only diagnostics, one line/second in RE_Kenshi_log.txt.\r\n"
+        "CameraDiagnostics = false\r\n"
         "; CTRL third-person camera: distance / height / shoulder offset.\r\n"
         "OtsDistance      = 20\r\n"
         "OtsHeight        = 15.0\r\n"
@@ -1604,6 +1645,19 @@ static void loadFirstPersonConfig(const char* path)
     s_fpBodySolidInside = GetPrivateProfileIntA("FirstPerson", "BodySolidInside", 1, path) != 0;
     // Below-floor reveal (0 = legacy character-based reveal only).
     s_fpFloorRevealBelow = GetPrivateProfileIntA("FirstPerson", "FloorRevealBelow", 1, path) != 0;
+}
+
+static float readCameraFloat(const char* path, const char* name, const char* fallback, float low, float high)
+{
+    char buf[64];
+    GetPrivateProfileStringA("Settings", name, fallback, buf, sizeof(buf), path);
+    char* end = nullptr;
+    double value = strtod(buf, &end);
+    while (end != buf && isspace((unsigned char)*end)) ++end;
+    if (!_finite(value) || end == buf || *end) value = atof(fallback);
+    if (value < low) value = low;
+    if (value > high) value = high;
+    return (float)value;
 }
 
 static void loadKeybinds()
@@ -1838,6 +1892,25 @@ static void loadKeybinds()
         if (overrideMs > 10000.0) overrideMs = 10000.0;
         s_normalManualOverrideMs = (DWORD)overrideMs;
         normalResetAutoAlign();
+        GetPrivateProfileStringA("Settings", "CameraDiagnostics", "false", mbuf, sizeof(mbuf), path);
+        s_cameraDiagnostics = parseBool(mbuf, false);
+        GetPrivateProfileStringA("Settings", "SteeringMode", "false", mbuf, sizeof(mbuf), path);
+        s_steeringMode = parseBool(mbuf, false);
+        s_steeringTurnSpeed = readCameraFloat(path, "SteeringTurnSpeed", "90.0", 10.0f, 360.0f);
+        GetPrivateProfileStringA("Settings", "NormalMouseLook", "false", mbuf, sizeof(mbuf), path);
+        s_normalMouseLook = parseBool(mbuf, false);
+        s_normalMouseSensitivity = readCameraFloat(path, "NormalMouseLookSensitivity", "1.0", 0.1f, 5.0f);
+        if (s_cameraDiagnostics)
+        {
+            char diag[MAX_PATH + 240];
+            sprintf_s(diag, sizeof(diag), "[WASDCombat] dc_camera_config path=%s normal=%d speed=%.2f override=%lu ots=%d",
+                path, (int)s_normalAutoAlign, s_normalAutoAlignSpeed, s_normalManualOverrideMs, (int)s_otsAutoAlign);
+            DebugLog(diag);
+            sprintf_s(diag, sizeof(diag), "[WASDCombat] dc_camera_controls steering=%d turn=%.2f look=%d sensitivity=%.2f autoKey=%s lookKey=%s",
+                (int)s_steeringMode, s_steeringTurnSpeed, (int)s_normalMouseLook, s_normalMouseSensitivity,
+                s_bindCfgStr[KR_AUTO_CAMERA], s_bindCfgStr[KR_NORMAL_LOOK]);
+            DebugLog(diag);
+        }
     }
 
     // [FirstPerson] tunables — read via the shared helper (also called on every
@@ -2091,14 +2164,16 @@ struct DcBindRow { int role; const char* label; const char* tip; };   // role < 
 static const DcBindRow s_dcBindRows[] =
 {
     { -1,         "MOVEMENT KEYS",       NULL },
-    { KR_FORWARD, "Move forward",        "Walk, jog or run in the direction the camera faces." },
-    { KR_LEFT,    "Move left",           NULL },
+    { KR_FORWARD, "Move forward",        "Camera-relative by default. With INI SteeringMode enabled, move in your character's heading." },
+    { KR_LEFT,    "Move left",           "Strafe by default; continuously steer left with INI SteeringMode enabled." },
     { KR_BACK,    "Move backward",       NULL },
-    { KR_RIGHT,   "Move right",          NULL },
+    { KR_RIGHT,   "Move right",          "Strafe by default; continuously steer right with INI SteeringMode enabled." },
     { KR_SELECT,  "Control hovered character", "Press with the mouse over one of your characters to control them instead." },
     { -1,         "CAMERA KEYS",         NULL },
     { KR_FP,      "First person (toggle)", "Puts the camera in your character's eyes. Press again to leave. The CTRL key toggles the third-person shoulder camera." },
     { KR_OTS_SHOULDER, "Swap camera shoulder", "Moves the third-person camera to the other shoulder." },
+    { KR_AUTO_CAMERA, "Automatic camera (toggle)", "Session master for NormalAutoAlign and OtsAutoAlign. Each mode still needs its INI setting enabled." },
+    { KR_NORMAL_LOOK, "Normal mouse-look (toggle)", "Normal V-only camera: hold ALT to release the cursor. Menus and pause also release it." },
     { KR_SNEAK,   "Sneak (SHIFT + key)", "Hold SHIFT and press this key to toggle sneaking in first person or the third-person camera." },
     { -1,         "MANUAL COMBAT KEYS",  NULL },
     { KR_MANUAL,  "Manual combat (toggle)", "On: your character only swings when you press Attack and fights whoever you point at. Off: normal AI combat." },
@@ -2552,6 +2627,8 @@ static void onPress(int role)
     else if (role == KR_FP)      handleFirstPersonPress();
     else if (role == KR_SNEAK)   handleSneakPress();
     else if (role == KR_OTS_SHOULDER) handleOtsShoulderPress();
+    else if (role == KR_AUTO_CAMERA) InterlockedIncrement(&s_autoCameraToggleRequest);
+    else if (role == KR_NORMAL_LOOK) InterlockedIncrement(&s_normalLookToggleRequest);
 }
 
 // -----------------------------------------------------------------------
@@ -2567,8 +2644,9 @@ static PollKey s_keys[] =
     { KR_SNEAK,   false }, { KR_OTS_SHOULDER, false },
     { KR_BLOCK,   false }, { KR_DODGE,  false }, { KR_ATTACK, false },
     { KR_MANUAL,  false },
+    { KR_AUTO_CAMERA, false }, { KR_NORMAL_LOOK, false },
 };
-static const int NUM_KEYS = 14;
+static const int NUM_KEYS = sizeof(s_keys) / sizeof(s_keys[0]);
 
 static bool isKenshiForeground()
 {
@@ -2581,10 +2659,20 @@ static bool isKenshiForeground()
 
 static DWORD WINAPI PollThread(LPVOID)
 {
+    bool wasForeground = false;
     while (true)
     {
         Sleep(50);
-        if (!isKenshiForeground()) continue;
+        bool foreground = isKenshiForeground();
+        bool regainedFocus = foreground && !wasForeground;
+        if (foreground != wasForeground) InterlockedIncrement(&s_cameraFocusSerial);
+        wasForeground = foreground;
+        if (!foreground)
+        {
+            InterlockedExchange(&s_autoCameraToggleRequest, 0);
+            InterlockedExchange(&s_normalLookToggleRequest, 0);
+            continue;
+        }
         // Movement roles are ALWAYS VK-polled (INI-configurable) — the
         // native keybind system is one-command-per-key and vanilla camera
         // owns W/S/A/D, so DC movement cannot live there.  Toggle/speed
@@ -2622,7 +2710,11 @@ static DWORD WINAPI PollThread(LPVOID)
             }
             if (!wasWasd && (s_wHeld || s_aHeld || s_sHeld || s_dHeld))
                 s_wasdTapStartMs = GetTickCount64();
-            if (down) onPress(role);
+            if (down && (!(role == KR_AUTO_CAMERA || role == KR_NORMAL_LOOK)
+                || (!regainedFocus && s_mode == MODE_FREE_MOVE && !s_camRotateUiOpen
+                    && !(GetAsyncKeyState(VK_CONTROL) & 0x8000)
+                    && !(GetAsyncKeyState(VK_MENU) & 0x8000)
+                    && !(GetAsyncKeyState(VK_SHIFT) & 0x8000)))) onPress(role);
         }
         // Evaluate the complete key set so W->D in one poll is still one
         // gesture, even though W is visited before D in the loop above.
@@ -3207,6 +3299,18 @@ static float normalMovementReferenceYaw(CameraClass* cam, float viewYaw, bool wa
 static bool computeWASDDirection(bool bW, bool bA, bool bS, bool bD, Ogre::Vector3& outDir)
 {
     if (!ou) return false;
+    if (s_steeringMode && !s_firstPersonActive && !s_fpActive
+        && !(s_steeringLegacyMovement && s_steeringAnchor == s_freeMoveAnchor
+            && s_steeringMovement == s_anchorMovement))
+    {
+        // Movement intent and character steering yaw are independent of view yaw.
+        // A/D change yaw once per frame elsewhere; they add no lateral velocity.
+        if (!s_steeringValid || s_steeringAnchor != s_freeMoveAnchor
+            || s_steeringMovement != s_anchorMovement || bW == bS) return false;
+        float sign = bW ? 1.0f : -1.0f;
+        outDir = Ogre::Vector3(-sinf(s_steeringYaw) * sign, 0.0f, -cosf(s_steeringYaw) * sign);
+        return true;
+    }
     bool haveCam = ou->player && ou->player->camera;
     Ogre::Vector3 camFwd;
     if (s_firstPersonActive)
@@ -3254,6 +3358,13 @@ static bool computeWASDDirection(bool bW, bool bA, bool bS, bool bD, Ogre::Vecto
     if (mlen < 0.001f) return false;
     outDir = g_loco.normalizeDiagonalMovement ? (move / mlen) : move;
     return true;
+}
+
+static float steeringAdvanceYaw(float yaw, bool left, bool right, float dt)
+{
+    if (!_finite(dt) || dt <= 0.0f || dt > 0.25f) return yaw;
+    return otsWrapYaw(yaw + ((left ? 1.0f : 0.0f) - (right ? 1.0f : 0.0f))
+        * s_steeringTurnSpeed * (3.14159265f / 180.0f) * dt);
 }
 
 // -----------------------------------------------------------------------
@@ -6178,7 +6289,7 @@ static void otsCamDrive(CameraClass* thisptr, bool uiOpen, int wheelPre)
     }
     else s_otsCursorCaptured = false;
 
-    if (autoAlignAllowed)
+    if (autoAlignAllowed && s_autoCameraEnabled)
     {
         static LONGLONG alignFreq = 0;
         if (!alignFreq)
@@ -6206,10 +6317,11 @@ static void otsCamDrive(CameraClass* thisptr, bool uiOpen, int wheelPre)
                 step.y = 0.0f;
                 float horizontalSq = step.squaredLength();
                 float speedSq = horizontalSq / (dt * dt);
-                if (horizontalSq >= 0.000004f && speedSq >= 0.25f && speedSq <= 1440000.0f
+                bool headingIntent = s_steeringMode && s_steeringValid && s_steeringIntent;
+                if ((headingIntent || (horizontalSq >= 0.000004f && speedSq >= 0.25f && speedSq <= 1440000.0f))
                     && !acceptedMouse && GetTickCount64() >= s_otsMouseOverrideUntilMs)
                 {
-                    float targetYaw = atan2f(-step.x, -step.z);
+                    float targetYaw = headingIntent ? s_steeringYaw : atan2f(-step.x, -step.z);
                     float yawError = otsWrapYaw(targetYaw - s_otsYaw);
                     float turnDt = dt > 0.05f ? 0.05f : dt;
                     float alpha = 1.0f - expf(-s_otsAutoAlignSpeed * turnDt);
@@ -6441,6 +6553,11 @@ static bool normalCameraYaw(CameraClass* cam, float& yaw)
 {
     // CameraClass::yaw/pitch are transient input deltas, zeroed by
     // rotationUpdate. Use the same actual orbit heading as normal WASD.
+    // getFacingDirection reads CACHED derived positions in Kenshi 1.0.65.
+    // Refresh both ends after a follow/rotation write before using the result
+    // as feedback; stale caches must not be interpreted as manual rotation.
+    cam->getCenterNode()->_getDerivedPositionUpdated();
+    cam->getCameraNode()->_getDerivedPositionUpdated();
     Ogre::Vector3 forward = cam->getFacingDirection();
     if (!_finite(forward.x) || !_finite(forward.z)
         || forward.x * forward.x + forward.z * forward.z < 0.000001f) return false;
@@ -6451,31 +6568,170 @@ static bool normalCameraYaw(CameraClass* cam, float& yaw)
 // Apply before orig so native following, zoom, terrain/collision constraints,
 // audio and cursor handling all run on the rotated rig in the same update.
 // Returns a post-auto/pre-native heading to measure intentional rotation only.
-static bool normalAutoAlignBeforeUpdate(CameraClass* cam, bool controlEnabled, float& yawBeforeNative)
+static unsigned int normalCameraGates(CameraClass* cam, bool controlEnabled)
 {
     // Order matters: establish world/anchor liveness before dereferencing them.
-    bool active = s_normalAutoAlign && s_mode == MODE_FREE_MOVE
+    bool active = s_mode == MODE_FREE_MOVE
         && !s_fpActive && !s_firstPersonActive && !s_otsCamActive && !s_camRotateToggle
         && !s_otsRestorePending && !s_loadGuardActive && !s_dcShutdownInProgress
         && !s_dcPtrLossActive && !s_realLoadLatched && ou
         && !ou->isLoadingFromASaveGame() && ou->player;
-    if (!active) { normalResetAutoAlign(); return false; }
+    if (!active) return 1;
     // Portrait/preview camera updates must not reset the player's travel history.
-    if (cam != ou->player->camera) return false;
-    bool allowed = !ou->isPaused()
-        && controlEnabled && !dcUiWantsCursor()
-        && !(gui && gui->isAnyInventoryWindowOpen()) // also move-through inventory
-        && !s_menuSuspendActive && !s_cameraLockTurretSuspend && !s_lootUiSuspendActive
-        && isKenshiForegroundMain() && s_freeMoveAnchor && s_gwFrame
-        && dcInUpdateList(s_gwFrame, s_freeMoveAnchor)
-        && s_anchorMovement && s_anchorMovement == s_freeMoveAnchor->movement
-        && !s_freeMoveAnchor->isDead() && !s_freeMoveAnchor->isUnconcious()
-        && !isProtectedAnimationState(s_freeMoveAnchor)
-        && !s_freeMoveAnchor->isRagdoll() && !s_freeMoveAnchor->isBeingCarried()
-        && cam->isInitialised() && cam->terrainLoaded && !cam->isFreeCameraMode()
-        && cam->camera && cam->getCenterNode() && cam->getCameraNode()
-        && cam->camera->getParentSceneNode() == cam->getCameraNode()
-        && cam->getFollowObject() == s_freeMoveAnchor;
+    if (cam != ou->player->camera) return 2;
+    // Bit masks keep diagnostics useful without dereferencing an unproven anchor.
+    unsigned int gates = 0;
+    if (ou->isPaused()) gates |= 4;
+    if (!controlEnabled) gates |= 8;
+    if (dcUiWantsCursor() || (gui && gui->isAnyInventoryWindowOpen())) gates |= 16;
+    if (s_menuSuspendActive || s_cameraLockTurretSuspend || s_lootUiSuspendActive) gates |= 32;
+    if (!isKenshiForegroundMain()) gates |= 64;
+    bool live = s_freeMoveAnchor && s_gwFrame && dcInUpdateList(s_gwFrame, s_freeMoveAnchor);
+    if (!live) gates |= 128;
+    if (!live || !s_anchorMovement || s_anchorMovement != s_freeMoveAnchor->movement) gates |= 256;
+    if (live && (s_freeMoveAnchor->isDead() || s_freeMoveAnchor->isUnconcious()
+        || isProtectedAnimationState(s_freeMoveAnchor) || s_freeMoveAnchor->isRagdoll()
+        || s_freeMoveAnchor->isBeingCarried())) gates |= 512;
+    if (!cam->isInitialised() || !cam->terrainLoaded || cam->isFreeCameraMode()) gates |= 1024;
+    if (!cam->camera || !cam->getCenterNode() || !cam->getCameraNode()
+        || cam->camera->getParentSceneNode() != cam->getCameraNode()) gates |= 2048;
+    if (cam->getFollowObject() != s_freeMoveAnchor) gates |= 4096;
+    return gates;
+}
+
+static float normalLookSmooth(float& pending, float input, float dt)
+{
+    if (!_finite(dt) || dt <= 0.0f || dt > 0.25f || !_finite(input))
+    { pending = 0.0f; return 0.0f; }
+    pending += input;
+    float applied = pending * (1.0f - expf(-24.0f * dt));
+    pending -= applied;
+    return applied;
+}
+
+static float normalLookPitchDelta(float elevation, float delta)
+{
+    // Normal camera remains above the horizon: 5..80 degrees down. If a
+    // vanilla pose starts outside the limits, allow only motion back inward.
+    const float low = -1.3962634f, high = -0.0872665f;
+    float target = elevation + delta;
+    if (delta < 0.0f && target < low) return elevation > low ? low - elevation : 0.0f;
+    if (delta > 0.0f && target > high) return elevation < high ? high - elevation : 0.0f;
+    return delta;
+}
+
+static void normalReleaseMouseLook(bool restorePointer)
+{
+    if (s_normalLookCaptured)
+    {
+        dcUpdateCrosshair(false);
+        if (restorePointer && isKenshiForegroundMain())
+        {
+            HWND w = GetForegroundWindow();
+            POINT p = s_normalLookSavedCursor;
+            RECT r;
+            if (w && GetClientRect(w, &r) && ScreenToClient(w, &p))
+            {
+                if (p.x < r.left) p.x = r.left;
+                if (p.y < r.top) p.y = r.top;
+                if (p.x >= r.right) p.x = r.right - 1;
+                if (p.y >= r.bottom) p.y = r.bottom - 1;
+                MyGUI::InputManager* im = MyGUI::InputManager::getInstancePtr();
+                if (im) im->injectMouseMove(p.x, p.y, 0);
+                ClientToScreen(w, &p);
+                SetCursorPos(p.x, p.y);
+            }
+        }
+    }
+    s_normalLookCaptured = s_normalLookMoved = false;
+    s_normalLookCamera = nullptr;
+    s_normalLookAnchor = nullptr;
+    s_normalLookYawPending = s_normalLookPitchPending = 0.0f;
+}
+
+// Runs before native zoom/follow/terrain processing; never detaches the lens.
+// Only one mode consumes the shared DI accumulator in a frame. No drain while
+// FP/OTS owns it; normal capture always discards the first sample on (re)entry.
+static void normalMouseLookBeforeUpdate(CameraClass* cam, bool controlEnabled)
+{
+    if (!s_loadGuardActive && !s_dcShutdownInProgress && ou && ou->player
+        && cam != ou->player->camera) return;
+    s_normalLookMoved = false;
+    static LONGLONG last = 0, frequency = 0;
+    LONGLONG tick = qpcNow();
+    if (!frequency) { LARGE_INTEGER f; QueryPerformanceFrequency(&f); frequency = f.QuadPart; }
+    float dt = last && frequency ? (float)((double)(tick - last) / frequency) : 0.0f;
+    last = tick;
+    bool allowed = s_normalMouseLook && normalCameraGates(cam, controlEnabled) == 0
+        && !(GetAsyncKeyState(VK_MENU) & 0x8000);
+    if (!allowed) { normalReleaseMouseLook(true); return; }
+    LONG focusSerial = s_cameraFocusSerial;
+    if (s_normalLookCaptured && (s_normalLookCamera != cam || s_normalLookAnchor != s_freeMoveAnchor
+        || s_normalLookFocusSerial != focusSerial || dt <= 0.0f || dt > 0.25f))
+        normalReleaseMouseLook(false);
+    HWND w = GetForegroundWindow(); RECT rc;
+    if (!w || !GetClientRect(w, &rc)) { normalReleaseMouseLook(true); return; }
+    POINT center = { (rc.left + rc.right) / 2, (rc.top + rc.bottom) / 2 };
+    ClientToScreen(w, &center);
+    bool wasCaptured = s_normalLookCaptured;
+    if (!wasCaptured)
+    {
+        if (!GetCursorPos(&s_normalLookSavedCursor)) return;
+        s_normalLookCamera = cam;
+        s_normalLookAnchor = s_freeMoveAnchor;
+        s_normalLookFocusSerial = focusSerial;
+    }
+    fpEnsureDInput(); fpStartDInputThread();
+    bool raw = s_diReady;
+    float dx = 0.0f, dy = 0.0f;
+    if (raw) fpTakeMouseAccum(&dx, &dy);
+    else
+    {
+        POINT p;
+        if (!GetCursorPos(&p)) { normalReleaseMouseLook(true); return; }
+        dx = (float)(p.x - center.x); dy = (float)(p.y - center.y);
+    }
+    SetCursorPos(center.x, center.y);
+    s_normalLookCaptured = true;
+    dcUpdateCrosshair(true);
+    // Baseline also when switching from warp fallback to raw input. Cursor
+    // recentering and mouse movement made in menus can never rotate the view.
+    bool accept = wasCaptured && raw == s_normalLookRaw;
+    s_normalLookRaw = raw;
+    if (!accept) { s_normalLookYawPending = s_normalLookPitchPending = 0.0f; return; }
+    float scale = FP_RAD_PER_PIXEL * s_normalMouseSensitivity;
+    float yaw = normalLookSmooth(s_normalLookYawPending, -dx * scale, dt);
+    float pitch = normalLookSmooth(s_normalLookPitchPending, -dy * scale, dt);
+    cam->getCenterNode()->_getDerivedPositionUpdated();
+    cam->getCameraNode()->_getDerivedPositionUpdated();
+    Ogre::Vector3 dir = cam->getCenterNode()->_getDerivedPositionUpdated()
+        - cam->getCameraNode()->_getDerivedPositionUpdated();
+    float length = dir.length();
+    if (!_finite(length) || length < 0.001f) return;
+    dir /= length;
+    float y = dir.y < -1.0f ? -1.0f : (dir.y > 1.0f ? 1.0f : dir.y);
+    float limitedPitch = normalLookPitchDelta(asinf(y), pitch);
+    if (limitedPitch != pitch) s_normalLookPitchPending = 0.0f;
+    cam->getCenterNode()->yaw(Ogre::Radian(yaw), Ogre::Node::TS_WORLD);
+    cam->getCenterNode()->pitch(Ogre::Radian(limitedPitch), Ogre::Node::TS_LOCAL);
+    cam->getCameraNode()->_getFullTransformUpdated();
+    s_normalLookMoved = fabsf(yaw) + fabsf(limitedPitch) > 0.000001f;
+    if (s_normalLookMoved)
+    {
+        s_normalOverrideUntilMs = GetTickCount64() + s_normalManualOverrideMs;
+        if (s_normalMoveRefValid) s_normalMoveRefYaw = otsWrapYaw(s_normalMoveRefYaw + yaw);
+    }
+}
+
+static bool normalAutoAlignBeforeUpdate(CameraClass* cam, bool controlEnabled, float& yawBeforeNative)
+{
+    // Ignore portrait cameras before touching any player controller state.
+    if (!s_loadGuardActive && !s_dcShutdownInProgress && ou && ou->player
+        && cam != ou->player->camera) return false;
+    s_normalSampleDt = s_normalSampleSpeed = s_normalRequestedYaw = 0.0f;
+    s_normalManualInput = false;
+    s_normalGate = normalCameraGates(cam, controlEnabled);
+    bool allowed = s_normalAutoAlign && s_normalGate == 0;
     if (!allowed || !normalCameraYaw(cam, yawBeforeNative))
     {
         normalResetAutoAlign();
@@ -6483,10 +6739,12 @@ static bool normalAutoAlignBeforeUpdate(CameraClass* cam, bool controlEnabled, f
     }
 
     normalMovementReferenceYaw(cam, yawBeforeNative, s_wHeld || s_aHeld || s_sHeld || s_dHeld);
+    s_normalGate = 0;
     // Respect both mouse rotation (even held still) and native keyboard yaw /
     // tilt. Combat Q/E flags have already been filtered by cameraUpdate_hook.
-    bool manual = cam->isRotating || (key && (key->rotate || key->rotLeft || key->rotRight
+    bool manual = s_normalLookMoved || cam->isRotating || (key && (key->rotate || key->rotLeft || key->rotRight
         || key->tiltUp || key->tiltDown));
+    s_normalManualInput = manual;
     ULONGLONG now = GetTickCount64();
     if (manual) s_normalOverrideUntilMs = now + s_normalManualOverrideMs;
 
@@ -6514,19 +6772,25 @@ static bool normalAutoAlignBeforeUpdate(CameraClass* cam, bool controlEnabled, f
     step.y = 0.0f;
     float horizontalSq = step.squaredLength();
     float speedSq = horizontalSq / (dt * dt);
-    if (horizontalSq < 0.000004f || speedSq < 0.25f || speedSq > 1440000.0f
+    s_normalSampleDt = dt;
+    s_normalSampleSpeed = sqrtf(speedSq);
+    bool headingIntent = s_steeringMode && s_steeringValid && s_steeringIntent;
+    if ((!headingIntent && (horizontalSq < 0.000004f || speedSq < 0.25f || speedSq > 1440000.0f))
+        || !s_autoCameraEnabled
         || manual || now < s_normalOverrideUntilMs) return true;
 
-    float targetYaw = atan2f(-step.x, -step.z);
+    float targetYaw = headingIntent ? s_steeringYaw : atan2f(-step.x, -step.z);
     float turnDt = dt > 0.05f ? 0.05f : dt;
     float delta = otsWrapYaw(targetYaw - yawBeforeNative)
         * (1.0f - expf(-s_normalAutoAlignSpeed * turnDt));
+    s_normalRequestedYaw = delta;
     // This is the exact Ogre operation used by native rotationUpdate, without
     // its mouse sensitivity / frame-time scaling. Keep the existing local lens
     // pose and orbit radius: no detach, setPosition, zoom, pitch or follow writes.
     cam->getCenterNode()->yaw(Ogre::Radian(delta), Ogre::Node::TS_WORLD);
     cam->getCameraNode()->_getFullTransformUpdated(); // native rotationUpdate does this too
     normalCameraYaw(cam, yawBeforeNative);
+    s_normalWrittenYaw = yawBeforeNative;
     return true;
 }
 
@@ -6535,7 +6799,10 @@ static void normalAutoAlignAfterUpdate(CameraClass* cam, float yawBeforeNative)
     float yawAfterNative;
     if (!normalCameraYaw(cam, yawAfterNative)) { normalResetAutoAlign(); return; }
     float manualDelta = otsWrapYaw(yawAfterNative - yawBeforeNative);
-    if (fabsf(manualDelta) > 0.00001f)
+    // Native tracking/collision/cache updates can change the sampled heading.
+    // Only actual rotation input is allowed to edit the movement reference or
+    // extend the manual override. Otherwise native drift can disable auto forever.
+    if (s_normalManualInput && fabsf(manualDelta) > 0.00001f)
     {
         s_normalOverrideUntilMs = GetTickCount64() + s_normalManualOverrideMs;
         if (s_normalMoveRefValid)
@@ -6543,9 +6810,98 @@ static void normalAutoAlignAfterUpdate(CameraClass* cam, float yawBeforeNative)
     }
 }
 
+// One line/second, player hook only. No extra world/character dereferences.
+static void normalCameraDiagnostic(CameraClass* cam, bool controlEnabled, bool observed, float before)
+{
+    if (!s_cameraDiagnostics || s_loadGuardActive || s_dcShutdownInProgress
+        || !ou || !ou->player || cam != ou->player->camera) return;
+    ULONGLONG now = GetTickCount64();
+    if (now - s_cameraDiagLastMs < 1000) return;
+    s_cameraDiagLastMs = now;
+    float after = 0.0f;
+    float viewYaw = 0.0f;
+    bool rig = cam->camera && cam->getCenterNode() && cam->getCameraNode();
+    if (rig)
+    {
+        normalCameraYaw(cam, after);
+        Ogre::Vector3 view = cam->camera->getDerivedDirection();
+        if (_finite(view.x) && _finite(view.z)) viewYaw = atan2f(-view.x, -view.z);
+    }
+    char b[768];
+    sprintf_s(b, sizeof(b), "[WASDCombat] dc_normal_camera gate=0x%X mode=%d normal=%d master=%d ctl=%d observed=%d fp=%d ots=%d load=%d ptr=%d manual=%d rotate=%d look=%d captured=%d raw=%d override=%llu dt=%.5f speed=%.3f request=%.5f written=%.4f pre=%.4f post=%.4f view=%.4f steer=%d heading=%.4f parent=%p node=%p center=%p anchor=%p movement=%p",
+        s_normalGate, (int)s_mode, (int)s_normalAutoAlign, (int)s_autoCameraEnabled, (int)controlEnabled, (int)observed,
+        (int)(s_fpActive || s_firstPersonActive), (int)(s_otsCamActive || s_camRotateToggle),
+        (int)s_realLoadLatched, (int)s_dcPtrLossActive, (int)s_normalManualInput, (int)cam->isRotating,
+        (int)s_normalMouseLook, (int)s_normalLookCaptured, (int)s_normalLookRaw,
+        now < s_normalOverrideUntilMs ? s_normalOverrideUntilMs - now : 0,
+        s_normalSampleDt, s_normalSampleSpeed, s_normalRequestedYaw, s_normalWrittenYaw, before, after,
+        viewYaw, (int)s_steeringIntent, s_steeringYaw,
+        cam->camera ? cam->camera->getParentSceneNode() : nullptr, cam->getCameraNode(), cam->getCenterNode(),
+        s_freeMoveAnchor, s_anchorMovement);
+    DebugLog(b);
+}
+
+static void cameraToggleRequests(CameraClass* cam, bool controlEnabled)
+{
+    if (s_loadGuardActive || s_dcShutdownInProgress || !ou || !ou->player
+        || ou->isLoadingFromASaveGame())
+    {
+        // Never replay a queued gameplay toggle after a load/menu transition.
+        InterlockedExchange(&s_autoCameraToggleRequest, 0);
+        InterlockedExchange(&s_normalLookToggleRequest, 0);
+        return;
+    }
+    if (cam != ou->player->camera) return;
+    LONG autoRequest = InterlockedExchange(&s_autoCameraToggleRequest, 0);
+    LONG lookRequest = InterlockedExchange(&s_normalLookToggleRequest, 0);
+    if (s_mode != MODE_FREE_MOVE || !controlEnabled || dcUiWantsCursor()
+        || !isKenshiForegroundMain() || ou->isLoadingFromASaveGame()) return;
+    if (autoRequest & 1)
+    {
+        s_autoCameraEnabled = !s_autoCameraEnabled;
+        s_normalAlignLastTick = s_otsAlignLastTick = 0;
+        // Keep the held-key movement references: toggling follow cannot redirect
+        // a held movement key. Manual input continues to edit its own reference.
+        ou->showPlayerAMessage(s_autoCameraEnabled ? "Automatic camera ON (configured modes)" : "Automatic camera OFF", false);
+        DebugLog(s_autoCameraEnabled ? "[WASDCombat] dc_auto_camera on" : "[WASDCombat] dc_auto_camera off");
+    }
+    if ((lookRequest & 1) && !s_firstPersonActive && !s_fpActive && !s_otsCamActive && !s_camRotateToggle)
+    {
+        s_normalMouseLook = !s_normalMouseLook;
+        ou->showPlayerAMessage(s_normalMouseLook ? "Normal mouse-look ON - hold ALT for cursor" : "Normal mouse-look OFF", false);
+        DebugLog(s_normalMouseLook ? "[WASDCombat] dc_normal_mouse_look on" : "[WASDCombat] dc_normal_mouse_look off");
+    }
+}
+
 static void (*s_cameraUpdateOrig)(CameraClass* thisptr, bool controlEnabled);
 static void cameraUpdate_hook(CameraClass* thisptr, bool controlEnabled)
 {
+    // A stuck load gate must also be diagnosable. Log plugin-owned state only:
+    // world/anchor/camera internals may be invalid during these transitions.
+    if (s_cameraDiagnostics && (s_loadGuardActive || s_dcShutdownInProgress || !ou))
+    {
+        ULONGLONG now = GetTickCount64();
+        if (now - s_cameraDiagLastMs >= 1000)
+        {
+            s_cameraDiagLastMs = now;
+            char b[160];
+            sprintf_s(b, sizeof(b), "[WASDCombat] dc_camera_guard hook=%p loadGuard=%d shutdown=%d ptrLoss=%d realLoad=%d",
+                thisptr, (int)s_loadGuardActive, (int)s_dcShutdownInProgress,
+                (int)s_dcPtrLossActive, (int)s_realLoadLatched);
+            DebugLog(b);
+        }
+    }
+    cameraToggleRequests(thisptr, controlEnabled);
+    normalMouseLookBeforeUpdate(thisptr, controlEnabled);
+    bool normalCapture = s_normalLookCaptured && thisptr == s_normalLookCamera;
+    bool savedRotate = key ? key->rotate : false;
+    if (normalCapture)
+    {
+        // Relative mouse input belongs to our normal orbit controller this frame.
+        // Native wheel, keyboard camera rotation, tracking and collision still run.
+        thisptr->isRotating = false;
+        if (key) key->rotate = false;
+    }
     // OTS owns the camera: clear the vanilla MMB-rotate state before the
     // game's update sees it, so MMB does nothing while OTS is active.
     if (s_fpActive || s_firstPersonActive)
@@ -6583,6 +6939,7 @@ static void cameraUpdate_hook(CameraClass* thisptr, bool controlEnabled)
     float normalYawBeforeNative = 0.0f;
     bool observeNormalRotation = normalAutoAlignBeforeUpdate(thisptr, controlEnabled, normalYawBeforeNative);
     s_cameraUpdateOrig(thisptr, ctlEnabled);
+    if (normalCapture && key) key->rotate = savedRotate;
     manualAttackHudUpdate();    // "Manual Attack" label (self-gated)
     focusMarkersUpdate(thisptr);   // lock dot + weapon glints (self-gated)
 
@@ -6662,6 +7019,7 @@ static void cameraUpdate_hook(CameraClass* thisptr, bool controlEnabled)
 
     if (observeNormalRotation)
         normalAutoAlignAfterUpdate(thisptr, normalYawBeforeNative);
+    normalCameraDiagnostic(thisptr, controlEnabled, observeNormalRotation, normalYawBeforeNative);
 
     // ANY open UI fully DISABLES the CTRL camera-rotate toggle (user req 2026-06-21
     // — simpler + robust): the moment a menu (dialogue, trade, loot, inventory,
@@ -6697,7 +7055,7 @@ static void cameraUpdate_hook(CameraClass* thisptr, bool controlEnabled)
     // stays hidden the whole time you're in the mode (except genuine UIs), so
     // any residual engine cursor blip is never visible.  Look-drive still uses
     // its own suspend (wantRotate / fpDriveFrame) independently.
-    dcUpdateCrosshair((s_firstPersonActive || s_camRotateToggle) && !dcUiWantsCursor());
+    dcUpdateCrosshair(s_normalLookCaptured || ((s_firstPersonActive || s_camRotateToggle) && !dcUiWantsCursor()));
 
     // OTS: drive the DEDICATED DETACHED CAMERA (2026-09-06 rebuild) — its own
     // camera node, own mouse-look, own cursor (like FP), no engine rotate.
@@ -7660,6 +8018,31 @@ static void charMovUpdate_hook(CharMovement* thisptr, float time)
         return;
     }
 
+    // Direction-only turns use the public movement API. Never teleport a body
+    // or replace an action animation. W+S cancels translation but can still turn.
+    bool steeringOwns = s_steeringMode && s_steeringValid && s_steeringIntent
+        && s_steeringMovement == thisptr && !s_firstPersonActive && !s_fpActive
+        && !isCommittedAction(thisptr->getCharacter())
+        && !isCommittedCombatClip(thisptr->getCharacter());
+    Ogre::Vector3 steeringFacing(-sinf(s_steeringYaw), 0.0f, -cosf(s_steeringYaw));
+    if (steeringOwns && !dirOk)
+    {
+        thisptr->halt();
+        thisptr->animationOverride = false;
+        thisptr->movementMode = MOVE_DIRECTION;
+        thisptr->desiredMotion = thisptr->currentMotion = Ogre::Vector3::ZERO;
+        thisptr->moveLimit = 0.0f;
+        Character* turnChar = thisptr->getCharacter();
+        CombatClass* turnCombat = turnChar ? turnChar->getCombatClass() : nullptr;
+        if (turnCombat) turnCombat->combatModeActive = false;
+        thisptr->faceDirection(steeringFacing);
+        s_charMovUpdateOrig(thisptr, time);
+        thisptr->faceDirection(steeringFacing);
+        s_wasdMovementApplied = true;
+        s_prevWasdDir = Ogre::Vector3::ZERO;
+        return;
+    }
+
     if (dirOk)
     {
         // Turn responsiveness: detect direction change and boost limit.
@@ -7728,7 +8111,7 @@ static void charMovUpdate_hook(CharMovement* thisptr, float time)
         if (ccFlip && ccFlip->combatModeActive)
             ccFlip->combatModeActive = false;
         s_charMovUpdateOrig(thisptr, time);
-
+        if (steeringOwns) thisptr->faceDirection(steeringFacing);
 
         // Post-original re-assert: the combat AI re-enables animationOverride /
         // flips movementMode away from MOVE_DIRECTION when it wants to drive the
@@ -9132,8 +9515,67 @@ static bool dcInUpdateList(GameWorld* gw, Character* c)
     return false;
 }
 
+// Once per world frame. No call from computeWASDDirection can advance yaw, so
+// AI queries, render rate and multiple movement consumers cannot multiply turns.
+static void steeringFrame()
+{
+    static LONGLONG last = 0, frequency = 0;
+    if (!frequency) { LARGE_INTEGER f; QueryPerformanceFrequency(&f); frequency = f.QuadPart; }
+    LONGLONG tick = qpcNow();
+    float dt = last && frequency ? (float)((double)(tick - last) / frequency) : 0.0f;
+    last = tick;
+    s_steeringIntent = false;
+    s_steeringLegacyMovement = false;
+    bool safe = s_steeringMode && s_mode == MODE_FREE_MOVE && !s_firstPersonActive && !s_fpActive
+        && !s_loadGuardActive && !s_dcShutdownInProgress && !s_dcPtrLossActive && !s_realLoadLatched
+        && ou && !ou->isLoadingFromASaveGame() && !ou->isPaused()
+        && isKenshiForegroundMain() && !dcUiWantsCursor()
+        && !(gui && gui->isAnyInventoryWindowOpen())
+        && !s_menuSuspendActive && !s_lootUiSuspendActive && !s_cameraLockTurretSuspend
+        && !s_healingJobActive && s_freeMoveAnchor && s_gwFrame
+        && dcInUpdateList(s_gwFrame, s_freeMoveAnchor) && s_anchorMovement
+        && s_anchorMovement == s_freeMoveAnchor->movement;
+    if (!safe) { s_steeringValid = false; return; }
+    Character* ch = s_freeMoveAnchor;
+    // These paths have established crawl/get-up/slave-order handling. Preserve
+    // that movement rather than forcing standing-only facing into them.
+    if (isDownedButMovable(ch) || isAnchoredToFurniture(ch) || slaveOrderDriven(ch))
+    {
+        s_steeringLegacyMovement = true;
+        s_steeringAnchor = ch;
+        s_steeringMovement = s_anchorMovement;
+        s_steeringValid = false;
+        return;
+    }
+    if (ch->isDead() || ch->isUnconcious() || isProtectedAnimationState(ch)
+        || ch->isRagdoll() || ch->isBeingCarried()
+        || isCommittedAction(ch) || isCommittedCombatClip(ch))
+    { s_steeringValid = false; return; }
+    bool held = s_wHeld || s_aHeld || s_sHeld || s_dHeld;
+    if (!s_steeringValid || s_steeringAnchor != ch || s_steeringMovement != s_anchorMovement || !held)
+    {
+        Ogre::Vector3 facing = s_anchorMovement->getFacingDirection();
+        if (!_finite(facing.x) || !_finite(facing.z) || facing.x*facing.x + facing.z*facing.z < 0.000001f)
+        { s_steeringValid = false; return; }
+        s_steeringYaw = atan2f(-facing.x, -facing.z);
+        s_steeringAnchor = ch;
+        s_steeringMovement = s_anchorMovement;
+        s_steeringValid = true;
+        dt = 0.0f; // reseed/resume without a catch-up turn
+    }
+    s_steeringIntent = held;
+    if (s_steeringIntent) s_steeringYaw = steeringAdvanceYaw(s_steeringYaw, s_aHeld, s_dHeld, dt);
+}
+
 static void mainLoop_hook(GameWorld* thisptr, float time)
 {
+    // Some game states stop updating the camera. Release our own cursor state
+    // from the world hook as well; never access cached camera/character pointers.
+    if (s_normalLookCaptured && (s_mode != MODE_FREE_MOVE || s_loadGuardActive
+        || s_dcShutdownInProgress || !isKenshiForegroundMain() || !ou
+        || ou->isLoadingFromASaveGame() || dcUiWantsCursor()
+        || (gui && gui->isAnyInventoryWindowOpen()) || (GetAsyncKeyState(VK_MENU) & 0x8000)))
+        normalReleaseMouseLook(true);
     s_gwFrame = thisptr;  // manual combat: world for the dodge foe scan (fresh every frame)
     // Build 74 (quickload froze 2026-10-01, 6501 per-frame AVs): the SaveManager
     // signal is set when a load is REQUESTED and consumed before the loading
@@ -9879,6 +10321,7 @@ static void mainLoop_hook(GameWorld* thisptr, float time)
     s_frameMode        = s_mode;
     s_frameWasdHeld    = s_wHeld || s_aHeld || s_sHeld || s_dHeld;
     s_frameLootSuspend = s_lootUiSuspendActive;
+    steeringFrame();
 
     // 2. Selection tracking.
     {

@@ -39,6 +39,8 @@ CONTROLS
   CTRL       Toggle the third-person action camera (over-the-
              shoulder view with a centered crosshair)
   H          Swap the camera to the other shoulder
+  F6         Toggle automatic camera follow (configured modes only)
+  F10        Toggle mouse-look for the NORMAL V-only camera
   SHIFT+C    Toggle sneak (first person or third-person camera)
   ALT        Hold for a free mouse cursor in first / third person
 
@@ -51,6 +53,52 @@ CONTROLS
   distance.
 
   Every key can be changed in-game: Options > Direct Control.
+
+OPTIONAL STEERING AND NORMAL MOUSE-LOOK
+--------------------------------------
+  New features default off. Add to the EXISTING INI sections:
+
+  [Keybinds]
+  ToggleAutoCamera = F6
+  ToggleNormalMouseLook = F10
+
+  [Settings]
+  SteeringMode = false
+  SteeringTurnSpeed = 90.0
+  NormalMouseLook = false
+  NormalMouseLookSensitivity = 1.0
+  CameraDiagnostics = false
+
+  Set SteeringMode=true for character-relative W/S and continuous A/D
+  turning in normal and OTS modes. Turn speed is degrees per real second
+  (10-360). First person retains its existing movement. Crawl, furniture
+  and slave-order locomotion retain their established movement paths.
+  A/D alone requests facing through the game API with zero translation;
+  actual turn/backward animations still require in-game validation.
+
+  Set NormalAutoAlign=true and/or OtsAutoAlign=true for automatic follow
+  in each view. F6 is a session master; it respects these separate settings.
+  Steering follows character heading while keys are held, including S
+  and stationary turns. Otherwise automatic follow uses measured travel.
+
+  F10 changes the normal-camera mouse-look preference for this session.
+  NormalMouseLook sets its launch preference. Hold ALT to restore the
+  pointer and vanilla clicks. UI, inventory, pause, focus loss, loading
+  and mode changes release capture; eligible gameplay resumes it if on.
+  Sensitivity range: 0.1-5. Native zoom/tracking/terrain processing remains.
+  Mouse orbit pitch: 5-80 degrees below horizontal. FP/OTS are separate.
+
+  F7 conflicts with Kenshi's HUD toggle; F8 takes screenshots. Plain F6
+  and F10 were free in the checked controls.cfg. Modified combinations
+  (Shift/Ctrl/Alt) do not trigger these two toggles. Rebind if needed.
+  INI tuning needs a restart; the runtime toggles and Options key rebinds
+  do not. Runtime toggle states are not saved across game restarts.
+
+  The reported NormalAutoAlign failure is NOT verified fixed in-game.
+  CameraDiagnostics=true logs loaded values and camera state at most
+  once/second to RE_Kenshi_log.txt, independently of VerboseLog. See
+  README.md for collection steps, gate-mask meanings, regression tests,
+  source-level fixes and the remaining runtime playtest checklist.
 
 
 FEATURES

@@ -105,68 +105,162 @@ Everything is easiest to change in-game under **Options → Direct Control**. Fo
   - `HeadPixelHide = 1`, `HideHeadgear = 1`, `HideHair = 1` — hide your own head, headgear, and hair. `HideHead = 0` is a legacy head hide for custom races.
   - `FloorRevealBelow = 1` — render the storeys below you inside multi-floor buildings.
 
-## Automatic alignment in the normal camera (V only)
+## Steering, automatic camera and normal mouse-look
 
-Normal-camera alignment is optional and **off by default**. To enable it, add or
-edit these entries under the existing `[Settings]` section in `WASDCombatPlugin.ini`,
-then restart the game:
+The new controls are opt-in. Add these entries to the **existing** sections in
+`WASDCombatPlugin.ini` next to the DLL. These are the shipped defaults:
 
 ```ini
+[Keybinds]
+ToggleAutoCamera = F6
+ToggleNormalMouseLook = F10
+
 [Settings]
-NormalAutoAlign = true
+SteeringMode = false
+SteeringTurnSpeed = 90.0
+NormalAutoAlign = false
 NormalAutoAlignSpeed = 4.0
 NormalManualOverrideMs = 600
+NormalMouseLook = false
+NormalMouseLookSensitivity = 1.0
+OtsAutoAlign = false
+OtsAutoAlignSpeed = 4.0
+OtsMouseOverrideMs = 600
+CameraDiagnostics = false
 ```
 
-Press **V** to enable Direct Control and keep using Kenshi's normal camera.
-`NormalAutoAlignSpeed` is the turn response per second (0.1–20; higher turns
-faster). `NormalManualOverrideMs` is the delay after manual mouse or keyboard
-camera rotation before automatic turns resume (0–10000 ms). Holding a camera
-rotation control suppresses alignment even when this delay is zero. These
-settings are INI-only. Missing settings retain the disabled default; invalid
-numeric values use defaults and out-of-range values are clamped.
+For character steering with automatic camera follow in both third-person views,
+set `SteeringMode`, `NormalAutoAlign` and `OtsAutoAlign` to `true`, then restart.
+Camera/steering tuning is INI-only. The two hotkeys also appear under
+**Options > Direct Control**, can be rebound there without restarting, and save
+to the existing `[Keybinds]` section. Existing custom movement keys are used by
+role, including `KeyLayout=2`; the new roles do not change that layout.
 
-The camera smoothly faces the character's measured horizontal travel, including
-point-and-click travel while Direct Control remains enabled. It stops rotating
-as soon as horizontal travel stops. While WASD keys remain held, automatic turns
-do not change their movement reference: holding A/D/S or a diagonal keeps the
-same world direction. Releasing all movement keys and pressing again adopts the
-current camera heading. Manual camera yaw adds the same intentional turn to the
-held-key reference.
+**F6** toggles a session-wide automatic-camera master while Direct Control is
+active. Each view still respects its own `NormalAutoAlign` / `OtsAutoAlign`
+setting: the hotkey cannot enable a mode disabled in the INI. An in-game message
+and log line report the new state. Manual rotation, mouse-look and movement
+continue with the master off. The held-key movement reference is retained across
+the toggle. The master starts on at launch; runtime changes do not rewrite the
+mode settings or persist across restarts.
 
-Alignment suspends during pause, loading, loss of game focus, incapacitation,
-protected animations, turret use and relevant UI (including inventory in
-move-through mode). Resuming or changing the controlled character re-seeds
-travel history. Very small movement, implausible jumps and long frame gaps do
-not trigger turns. The normal camera keeps its native pitch, zoom, orbit radius,
-cursor controls and follow target. **Ctrl** still selects the separate action
-camera, whose existing `OtsAutoAlign` settings remain independent. First person
-does not use normal-camera alignment.
+F7 was rejected because it is Kenshi's `toggle_bar` key; F8 is `screenshot`.
+The installed `controls.cfg` had no plain F6/F10 binding when checked. Ctrl+F6
+is a separate vanilla developer command, so the new toggles ignore Shift/Ctrl/Alt
+combinations. Check other mods and your own bindings when choosing replacements;
+the existing duplicate-DC-key warning also covers these two roles.
 
-Implementation review: normal WASD obtains its heading from
-`CameraClass::getFacingDirection()`. Inspection of the local KenshiLib headers
-and the original executable retained by RE_Kenshi confirmed that native
-`rotationUpdate()` uses `getCenterNode()->yaw(..., Ogre::Node::TS_WORLD)`.
-Normal alignment uses that same exposed Ogre operation **before** the original
-camera update, so native follow, zoom, pitch and terrain/collision processing
-still run afterward. It does not detach the lens, write camera positions,
-change the follow target, add offsets or install any new hooks.
-`CameraClass::yaw/pitch` are transient rotation inputs consumed and cleared by
-the native update; normal alignment does not treat them as absolute orientation.
+With **`SteeringMode=true`**, your configured forward/backward keys move along
+an independent character heading. Left/right continuously steer that heading;
+forward+left/right makes a curved path, backward reverses velocity, and opposing
+forward/backward or left/right inputs cancel. Camera rotation never supplies
+the steering yaw. `SteeringTurnSpeed` is degrees per real second (10–360,
+default 90). It advances once per world frame; stalls longer than 250 ms and
+resume frames do not accumulate catch-up turns. First person retains its
+existing gaze-relative movement.
 
-Focused regression tests compile the production controller functions against
-fake game APIs with VC++ 2010 x64:
+Left/right alone requests a stationary turn through the public
+`CharMovement::faceDirection()` API, with direct-motion translation zeroed.
+No body teleport, skeleton rotation or forced turn animation is used. The API
+supports a facing request, but its visible turn-in-place and backward animation
+behavior still needs testing on actual characters/races in Kenshi. Committed
+actions and protected states retain control of the body. Crawling, leaving
+furniture and slave-order locomotion use the established camera-relative path
+instead of forcing standing steering into those special cases.
+
+While steering keys are held, automatic follow prefers the steering heading,
+including stationary turns and backward travel, so S does not ask the camera
+to flip 180 degrees. Otherwise it uses validated measured horizontal travel,
+including point-and-click travel, and stops rotating when travel stops.
+`NormalAutoAlignSpeed` and `OtsAutoAlignSpeed` are exponential turn response per
+second (0.1–20). Manual mouse/keyboard rotation takes priority, with the configured
+override delays (0–10000 ms). In strafe mode, auto-follow retains the original
+held-gesture movement reference; releasing and pressing again adopts the current
+view, and intentional manual yaw updates the reference. `SteeringMode=false`
+retains that original strafe behavior.
+
+**F10** toggles mouse-look only in normal V-only gameplay. `NormalMouseLook`
+sets its launch preference; runtime changes last for the session. The existing
+Kenshi orbit stays attached to the followed character. Relative input is smoothed
+with a short time-based response; `NormalMouseLookSensitivity` is 0.1–5. The
+normal orbit pitch is limited to 5–80 degrees below horizontal, without snapping
+an existing out-of-range vanilla pose back into range. Wheel zoom, tracking,
+native terrain processing and interaction commands remain active.
+
+Hold **ALT** for a regular pointer and vanilla selection/click behavior. Normal
+mouse-look always releases for inventory (including move-through inventory),
+menus, map/stats, dialogue, context menus, pause, focus loss, loading and mode
+switches. Release restores the saved pointer location when the game is focused.
+Returning to eligible normal gameplay resumes only if the preference is still
+on. Entry/resume, owner/focus changes and raw-input acquisition discard a baseline
+sample, avoiding recenter/backlog turns. FP and detached OTS keep their existing
+mouse consumers; the normal mode does not consume their accumulator samples.
+
+### NormalAutoAlign investigation and runtime diagnostics
+
+The reported V-only failure has **not been confirmed fixed in-game**. The
+installed INI was read and contained `NormalAutoAlign=true` and `OtsAutoAlign=true`.
+The installed log showed the camera hook being installed successfully, but had
+no per-frame evidence of eligibility, movement samples or native yaw ownership.
+No installed files were modified.
+
+Inspection of KenshiLib and the original 1.0.65 executable retained by RE_Kenshi
+confirms that native `rotationUpdate()` yaws the orbit center in world space and
+that `CameraClass::yaw/pitch` are transient inputs consumed by native update.
+`getFacingDirection()` reads cached derived positions. The controller now refreshes
+both position caches before using that heading. It also fixes a source-level
+feedback error: previously **every** heading change across native update extended
+the manual override and changed the held movement reference. Now only actual
+manual rotation input can do that. These fixes address demonstrable weaknesses;
+they do not establish which gate or write caused the reported runtime failure.
+
+To collect evidence after installing a test build yourself:
+
+1. Set `[Settings] CameraDiagnostics=true`, `NormalAutoAlign=true`, and initially
+   leave `NormalMouseLook=false` and `SteeringMode=false`. Restart the game.
+2. Enter V-only control, move in several directions for 10–15 seconds, release
+   movement, then test manual rotation. Repeat with steering enabled in a second
+   run, including A/D alone and S. Use F6 to test follow off/on.
+3. Copy `RE_Kenshi_log.txt` from the Kenshi directory after exiting. Include
+   `dc_camera_config`, `dc_camera_controls`, `dc_normal_camera`,
+   `dc_camera_guard` and the toggle lines. Turn diagnostics off afterward.
+
+Diagnostics are independent of `VerboseLog` and emit at most one camera sample
+per second, plus startup configuration and toggle events. The startup line gives
+the exact loaded INI path and resolved values. Runtime samples include the
+configuration/master, control/UI gates, cursor/raw state, manual override time,
+sample dt/speed, requested yaw, yaw immediately after the write, yaw across native
+update, rendered view yaw, steering heading, and camera/anchor ownership pointers.
+`written` is meaningful when `request` is nonzero. Yaws/deltas are radians.
+
+The `gate` mask adds these reasons (hex): `0x1` inactive mode/load/world guard;
+`0x2` non-player camera; `0x4` paused; `0x8` engine control disabled; `0x10`
+UI/inventory; `0x20` plugin UI/turret suspension; `0x40` background; `0x80` anchor
+not live; `0x100` movement mismatch; `0x200` incapacitated/protected character;
+`0x400` camera unready/free-camera; `0x800` rig/parent mismatch; `0x1000` follow
+target mismatch. A stuck load guard has its own pointer-safe heartbeat. Preview
+cameras do not reset the player's history or generate normal sample lines.
+
+### Verification
+
+Focused regression tests extract the production controllers and compile them
+against fake input/game/Ogre APIs using VC++ 2010 x64:
 
 ```powershell
 uv run --no-project python tests/run_normal_camera_tests.py
 ```
 
-These tests check movement feedback, smoothing, manual override, stationary and
-discontinuity handling, mode/UI/load/liveness gates, and default INI entries.
-They do not replace an in-game playtest. Before deploying, check V-only A/D/S
-and diagonal holds, manual MMB and rebound camera keys, wheel zoom and pitch,
-terrain/interior collision, inventory/map/dialogue/pause, character changes and
-save loading; then check Ctrl action camera, P first person and combat controls.
+They cover steering time scaling and view independence, backwards/cancelled
+intent, stationary heading follow, tuning validation, runtime toggles and held
+movement, normal alignment/manual priority, capture/release/resume and accumulator
+ownership, pitch/smoothing, discontinuities, liveness, UI/load/focus gates, and
+shipped/generated INI defaults. These are controller regressions, not evidence of
+actual Ogre rendering, character animation or collision behavior in the game.
+
+In-game checks remain required: V-only/OTS curved runs, S and A/D-only turns,
+custom movement/camera keys, mouse-look/ALT selection and loot, wheel zoom and
+terrain/interior collision, map/dialogue/inventory/pause, focus/minimize/restore,
+character changes/save loading, first person, and existing manual combat.
 
 ## Compatibility & Notes
 
