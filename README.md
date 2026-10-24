@@ -2,7 +2,7 @@
 
 **Enhanced fork of [Direct Control for Kenshi](https://github.com/smokefoolius/Kenshi-Direct-Control), originally developed by smokefoolius. Maintained by MstrxDev.**
 
-This edition preserves the original WASD movement, first-person and over-the-shoulder cameras, and manual combat system while adding automatic camera alignment, normal-camera mouse-look, optional curved steering, and camera orientation safeguards.
+This edition preserves the original WASD movement, first-person and over-the-shoulder cameras, and manual combat system while adding automatic camera alignment, normal-camera mouse-look, optional curved steering, and improved camera orientation.
 
 The original developer retains credit for the base project. This fork and its modifications remain distributed under GPL-3.0.
 
