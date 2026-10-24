@@ -363,6 +363,21 @@ static POINT            s_normalLookSavedCursor;
 static CameraClass*     s_normalLookCamera = nullptr; // identity only
 static Character*       s_normalLookAnchor = nullptr;
 static float            s_normalLookYawPending = 0.0f, s_normalLookPitchPending = 0.0f;
+// An obligation to check the CURRENT attached player rig, never a cached pointer.
+// Kept across cursor release so an F10/mode exit can repair a damaged pose safely.
+static bool             s_normalLookNeedsCheck = false;
+static float            s_normalLookDx = 0.0f, s_normalLookDy = 0.0f;
+static float            s_normalLookPitchBefore = 0.0f, s_normalLookPitchRequested = 0.0f, s_normalLookPitchClamped = 0.0f;
+static float            s_normalLookNativeYaw = 0.0f, s_normalLookNativePitch = 0.0f;
+static unsigned int     s_normalLookRecovery = 0;
+static ULONGLONG        s_normalPitchDiagLastMs = 0;
+struct NormalLookPose
+{
+    float yaw, pitch, viewPitch, roll, upY;
+    bool valid, nativeBasis, inverted;
+    NormalLookPose() : yaw(0), pitch(0), viewPitch(0), roll(0), upY(0),
+        valid(false), nativeBasis(false), inverted(true) {}
+};
 static float            s_normalAutoAlignSpeed = 4.0f;
 static DWORD            s_normalManualOverrideMs = 600;
 static CameraClass*     s_normalAlignCamera = nullptr;
@@ -380,6 +395,7 @@ static unsigned int     s_normalGate = 0;
 static float            s_normalSampleDt = 0.0f, s_normalSampleSpeed = 0.0f;
 static float            s_normalRequestedYaw = 0.0f, s_normalWrittenYaw = 0.0f;
 static ULONGLONG        s_cameraDiagLastMs = 0;
+static ULONGLONG        s_normalCaptureDiagLastMs = 0, s_normalWriteDiagLastMs = 0;
 
 static void normalResetAutoAlign()
 {
@@ -3304,10 +3320,12 @@ static bool computeWASDDirection(bool bW, bool bA, bool bS, bool bD, Ogre::Vecto
             && s_steeringMovement == s_anchorMovement))
     {
         // Movement intent and character steering yaw are independent of view yaw.
-        // A/D change yaw once per frame elsewhere; they add no lateral velocity.
+        // A/D alone drive forward along the turning heading, through the same
+        // direct-movement path as W. Opposing inputs cancel; never turn in place.
         if (!s_steeringValid || s_steeringAnchor != s_freeMoveAnchor
-            || s_steeringMovement != s_anchorMovement || bW == bS) return false;
-        float sign = bW ? 1.0f : -1.0f;
+            || s_steeringMovement != s_anchorMovement || (bW && bS)) return false;
+        float sign = bS ? -1.0f : ((bW || (bA != bD)) ? 1.0f : 0.0f);
+        if (sign == 0.0f) return false;
         outDir = Ogre::Vector3(-sinf(s_steeringYaw) * sign, 0.0f, -cosf(s_steeringYaw) * sign);
         return true;
     }
@@ -6578,7 +6596,7 @@ static unsigned int normalCameraGates(CameraClass* cam, bool controlEnabled)
         && !ou->isLoadingFromASaveGame() && ou->player;
     if (!active) return 1;
     // Portrait/preview camera updates must not reset the player's travel history.
-    if (cam != ou->player->camera) return 2;
+    if (!cam || cam != ou->player->camera) return 2;
     // Bit masks keep diagnostics useful without dereferencing an unproven anchor.
     unsigned int gates = 0;
     if (ou->isPaused()) gates |= 4;
@@ -6592,9 +6610,21 @@ static unsigned int normalCameraGates(CameraClass* cam, bool controlEnabled)
     if (live && (s_freeMoveAnchor->isDead() || s_freeMoveAnchor->isUnconcious()
         || isProtectedAnimationState(s_freeMoveAnchor) || s_freeMoveAnchor->isRagdoll()
         || s_freeMoveAnchor->isBeingCarried())) gates |= 512;
-    if (!cam->isInitialised() || !cam->terrainLoaded || cam->isFreeCameraMode()) gates |= 1024;
-    if (!cam->camera || !cam->getCenterNode() || !cam->getCameraNode()
-        || cam->camera->getParentSceneNode() != cam->getCameraNode()) gates |= 2048;
+    // initialised/terrainLoaded are NOT scene-lifetime/readiness contracts:
+    // native 1.0.65 constructs the complete attached rig with both flags false,
+    // and CameraClass::update does not gate normal following/rotation on them.
+    // isInitialised() only reads +0x20; manuallySetOrientationAndZoom sets it.
+    // Live read-only snapshot: initialised=1, terrainLoaded=0, freeCameraMode=0
+    // on the same native rig logged with gate=0x400 in normal V mode.
+    // Keep the actual free-camera exclusion and prove native rig ownership below.
+    if (cam->isFreeCameraMode()) gates |= 1024;
+    Ogre::SceneNode* center = cam->getCenterNode();
+    Ogre::SceneNode* node = cam->getCameraNode();
+    // Native structure: center -> node -> Ogre camera. parent == node is VALID.
+    // Detached OTS/FP cameras have a different parent and must not be driven here.
+    if (!cam->camera || !center || !node || center == node
+        || cam->camera->getParentSceneNode() != node
+        || node->getParentSceneNode() != center) gates |= 2048;
     if (cam->getFollowObject() != s_freeMoveAnchor) gates |= 4096;
     return gates;
 }
@@ -6609,21 +6639,173 @@ static float normalLookSmooth(float& pending, float input, float dt)
     return applied;
 }
 
-static float normalLookPitchDelta(float elevation, float delta)
+static float normalLookClampPitch(float pitch)
 {
-    // Normal camera remains above the horizon: 5..80 degrees down. If a
-    // vanilla pose starts outside the limits, allow only motion back inward.
-    const float low = -1.3962634f, high = -0.0872665f;
-    float target = elevation + delta;
-    if (delta < 0.0f && target < low) return elevation > low ? low - elevation : 0.0f;
-    if (delta > 0.0f && target > high) return elevation < high ? high - elevation : 0.0f;
-    return delta;
+    // Native center pitch is POSITIVE down: lens at local -Z, camera looks +Z.
+    // atan2(-center.zAxis.y, horizontalLength) is its absolute upright pitch.
+    const float low = 0.174532925f, high = 1.308996939f; // 10..75 degrees down
+    if (!_finite(pitch)) return 0.523598776f;          // native constructor: 30
+    return pitch < low ? low : (pitch > high ? high : pitch);
+}
+
+static bool normalLookQuaternionValid(const Ogre::Quaternion& q)
+{
+    return _finite(q.w) && _finite(q.x) && _finite(q.y) && _finite(q.z)
+        && _finite(q.Norm()) && q.Norm() > 0.000001f;
+}
+
+static NormalLookPose normalLookReadPose(CameraClass* cam)
+{
+    NormalLookPose p;
+    Ogre::Quaternion q = cam->getCenterNode()->_getDerivedOrientationUpdated();
+    if (!normalLookQuaternionValid(q)) return p;
+    q.normalise();
+    Ogre::Vector3 forward = q.zAxis(), up = q.yAxis(), right = q.xAxis();
+    float horizontal = sqrtf(forward.x * forward.x + forward.z * forward.z);
+    // Right-axis fallback preserves a useful heading at the vertical singularity.
+    p.yaw = horizontal > 0.0001f ? atan2f(forward.x, forward.z) : atan2f(-right.z, right.x);
+    p.pitch = atan2f(-forward.y, horizontal);
+    cam->getCameraNode()->_getFullTransformUpdated();
+    Ogre::Vector3 view = cam->camera->getDerivedDirection();
+    Ogre::Vector3 viewUp = cam->camera->getDerivedUp();
+    float viewLen = view.length(), upLen = viewUp.length();
+    if (!_finite(viewLen) || !_finite(upLen) || viewLen < 0.0001f || upLen < 0.0001f) return p;
+    view /= viewLen; viewUp /= upLen;
+    float viewHorizontal = sqrtf(view.x * view.x + view.z * view.z);
+    p.viewPitch = atan2f(-view.y, viewHorizontal);
+    // Signed roll against world +Y projected into the actual viewing plane.
+    p.roll = atan2f(view.z * viewUp.x - view.x * viewUp.z, viewUp.y);
+    p.upY = viewUp.y;
+    p.inverted = up.y <= 0.0f || viewUp.y <= 0.0f;
+    p.nativeBasis = forward.dotProduct(view) > 0.99999f && up.dotProduct(viewUp) > 0.99999f;
+    p.valid = _finite(p.yaw) && _finite(p.pitch) && _finite(p.roll) && viewHorizontal > 0.0001f;
+    // Include rig roll even if an altered lens happens to cancel it optically.
+    if (fabsf(right.y) > 0.0001f) p.nativeBasis = false;
+    return p;
+}
+
+static bool normalLookPoseSafe(const NormalLookPose& p)
+{
+    return p.valid && p.nativeBasis && !p.inverted && fabsf(p.roll) < 0.001f
+        && fabsf(normalLookClampPitch(p.pitch) - p.pitch) < 0.00001f;
+}
+
+static bool normalLookAttached(CameraClass* cam)
+{
+    // Recovery is also allowed after V/F10 exit, but never on a detached rig or
+    // through a cached camera pointer during scene teardown/loading.
+    if (s_loadGuardActive || s_dcShutdownInProgress || s_dcPtrLossActive || s_realLoadLatched
+        || s_fpActive || s_firstPersonActive || s_otsCamActive || s_camRotateToggle || s_otsRestorePending
+        || !ou || ou->isLoadingFromASaveGame() || !ou->player || !cam || cam != ou->player->camera
+        || cam->isFreeCameraMode()) return false;
+    Ogre::SceneNode* center = cam->getCenterNode();
+    Ogre::SceneNode* node = cam->getCameraNode();
+    return cam->camera && center && node && center != node
+        && cam->camera->getParentSceneNode() == node && node->getParentSceneNode() == center;
+}
+
+static bool normalLookWritePose(CameraClass* cam, float yaw, float pitch, bool repairOptics)
+{
+    // Both native rotationUpdate operations target CENTER: world-Y yaw, local-X
+    // pitch. Rebuild that same basis absolutely instead of accumulating deltas.
+    // Native evidence (1.0.65): constructor 6AF4F4/6AF615/6AF630, rotationUpdate
+    // 6AF872/6AF905. Do not use CameraClass::yaw/pitch: those are input deltas.
+    Ogre::Quaternion world = Ogre::Quaternion(Ogre::Radian(otsWrapYaw(yaw)), Ogre::Vector3::UNIT_Y)
+        * Ogre::Quaternion(Ogre::Radian(normalLookClampPitch(pitch)), Ogre::Vector3::UNIT_X);
+    Ogre::SceneNode* parent = cam->getCenterNode()->getParentSceneNode();
+    if (parent)
+    {
+        Ogre::Quaternion parentWorld = parent->_getDerivedOrientationUpdated();
+        if (!normalLookQuaternionValid(parentWorld)) return false;
+        parentWorld.normalise();
+        world = parentWorld.Inverse() * world;
+    }
+    world.normalise();
+    cam->getCenterNode()->setOrientation(world);
+    if (repairOptics)
+    {
+        // Restore only orientation to the constructor's native +Z optical basis.
+        // Preserve lens position (native zoom/collision), pivot, follow and FOV.
+        cam->getCameraNode()->setOrientation(Ogre::Quaternion::IDENTITY);
+        cam->camera->setOrientation(Ogre::Quaternion(Ogre::Radian(3.14159265f), Ogre::Vector3::UNIT_Y));
+    }
+    cam->getCameraNode()->_getFullTransformUpdated();
+    return true;
+}
+
+static void normalLookRecover(CameraClass* cam, unsigned int phase)
+{
+    NormalLookPose p = normalLookReadPose(cam);
+    if (normalLookPoseSafe(p)) return;
+    float pitch = !p.valid || p.inverted ? 0.523598776f : normalLookClampPitch(p.pitch);
+    if (normalLookWritePose(cam, p.yaw, pitch, !p.nativeBasis))
+    {
+        s_normalLookPitchPending = 0.0f;
+        s_normalLookRecovery |= phase | (p.inverted ? 8 : 0);
+    }
+}
+
+static void normalLookPitchDiagnostic(CameraClass* cam)
+{
+    if (!s_cameraDiagnostics) return;
+    ULONGLONG now = GetTickCount64();
+    if (now - s_normalPitchDiagLastMs < 1000) return;
+    s_normalPitchDiagLastMs = now;
+    NormalLookPose p = normalLookReadPose(cam);
+    Ogre::Quaternion q = cam->camera->getDerivedOrientation();
+    Ogre::Vector3 view = cam->camera->getDerivedDirection(), up = cam->camera->getDerivedUp();
+    char b[1024];
+    sprintf_s(b, sizeof(b), "[WASDCombat] dc_normal_pitch dx=%.2f dy=%.2f nativeInput=%.5f,%.5f nativeRemaining=%.5f,%.5f before=%.5f requested=%.5f clamped=%.5f rigYaw=%.5f rigPitch=%.5f viewPitch=%.5f viewQ=%.5f,%.5f,%.5f,%.5f viewDir=%.5f,%.5f,%.5f worldUp=%.5f,%.5f,%.5f upY=%.5f roll=%.5f valid=%d basis=%d inverted=%d inversionDetected=%d recovery=0x%X",
+        s_normalLookDx, s_normalLookDy, s_normalLookNativeYaw, s_normalLookNativePitch, cam->yaw, cam->pitch,
+        s_normalLookPitchBefore, s_normalLookPitchRequested, s_normalLookPitchClamped,
+        p.yaw, p.pitch, p.viewPitch, q.w, q.x, q.y, q.z, view.x, view.y, view.z, up.x, up.y, up.z, p.upY, p.roll,
+        (int)p.valid, (int)p.nativeBasis, (int)p.inverted, (int)((s_normalLookRecovery & 8) != 0), s_normalLookRecovery);
+    DebugLog(b);
+    s_normalLookRecovery = 0; // latch events until a rate-limited sample reports them
+}
+
+static void normalMouseLookAfterUpdate(CameraClass* cam)
+{
+    if (s_normalLookNeedsCheck && (!s_normalLookCaptured || cam == s_normalLookCamera)
+        && normalLookAttached(cam))
+    {
+        // Native keyboard tilt/rotation also touches center in update. Validate
+        // the final pose before rendering; do not accumulate on a stale offset.
+        normalLookRecover(cam, s_normalLookCaptured ? 2 : 4);
+        normalLookPitchDiagnostic(cam);
+        if (!s_normalLookCaptured) s_normalLookNeedsCheck = false;
+    }
+}
+
+static void normalCaptureDiagnostic(bool captured)
+{
+    if (!s_cameraDiagnostics) return;
+    ULONGLONG now = GetTickCount64();
+    if (now - s_normalCaptureDiagLastMs < 1000) return;
+    s_normalCaptureDiagLastMs = now;
+    char b[240];
+    sprintf_s(b, sizeof(b), "[WASDCombat] dc_normal_capture captured=%d raw=%d master=%d camera=%p anchor=%p",
+        (int)captured, (int)s_normalLookRaw, (int)s_autoCameraEnabled, s_normalLookCamera, s_normalLookAnchor);
+    DebugLog(b);
+}
+
+static void normalYawWriteDiagnostic(const char* driver, float requested, float before, float after)
+{
+    if (!s_cameraDiagnostics || fabsf(requested) < 0.000001f) return;
+    ULONGLONG now = GetTickCount64();
+    if (now - s_normalWriteDiagLastMs < 1000) return;
+    s_normalWriteDiagLastMs = now;
+    char b[240];
+    sprintf_s(b, sizeof(b), "[WASDCombat] dc_normal_yaw_write source=%s request=%.6f before=%.6f after=%.6f actual=%.6f",
+        driver, requested, before, after, otsWrapYaw(after - before));
+    DebugLog(b);
 }
 
 static void normalReleaseMouseLook(bool restorePointer)
 {
     if (s_normalLookCaptured)
     {
+        normalCaptureDiagnostic(false);
         dcUpdateCrosshair(false);
         if (restorePointer && isKenshiForegroundMain())
         {
@@ -6643,7 +6825,7 @@ static void normalReleaseMouseLook(bool restorePointer)
             }
         }
     }
-    s_normalLookCaptured = s_normalLookMoved = false;
+    s_normalLookCaptured = s_normalLookMoved = s_normalLookRaw = false;
     s_normalLookCamera = nullptr;
     s_normalLookAnchor = nullptr;
     s_normalLookYawPending = s_normalLookPitchPending = 0.0f;
@@ -6664,7 +6846,23 @@ static void normalMouseLookBeforeUpdate(CameraClass* cam, bool controlEnabled)
     last = tick;
     bool allowed = s_normalMouseLook && normalCameraGates(cam, controlEnabled) == 0
         && !(GetAsyncKeyState(VK_MENU) & 0x8000);
-    if (!allowed) { normalReleaseMouseLook(true); return; }
+    if (!allowed)
+    {
+        if (s_normalLookNeedsCheck && normalLookAttached(cam))
+        {
+            normalLookRecover(cam, 4);
+            normalLookPitchDiagnostic(cam);
+        }
+        normalReleaseMouseLook(true); return;
+    }
+    s_normalLookDx = s_normalLookDy = 0.0f;
+    s_normalLookNativeYaw = cam->yaw; s_normalLookNativePitch = cam->pitch;
+    normalLookRecover(cam, 1);
+    NormalLookPose pose = normalLookReadPose(cam);
+    if (!normalLookPoseSafe(pose)) { normalReleaseMouseLook(true); return; }
+    // Read actual native orientation every frame, including first capture and
+    // recapture after ALT, focus, loading or mode transitions. No offset state.
+    s_normalLookPitchBefore = s_normalLookPitchRequested = s_normalLookPitchClamped = pose.pitch;
     LONG focusSerial = s_cameraFocusSerial;
     if (s_normalLookCaptured && (s_normalLookCamera != cam || s_normalLookAnchor != s_freeMoveAnchor
         || s_normalLookFocusSerial != focusSerial || dt <= 0.0f || dt > 0.25f))
@@ -6681,8 +6879,10 @@ static void normalMouseLookBeforeUpdate(CameraClass* cam, bool controlEnabled)
         s_normalLookAnchor = s_freeMoveAnchor;
         s_normalLookFocusSerial = focusSerial;
     }
-    fpEnsureDInput(); fpStartDInputThread();
-    bool raw = s_diReady;
+    // Same device, poll thread, atomically consumed accumulator and warp fallback
+    // as otsCamDrive/fpDriveFrame. Never create a second input consumer/device.
+    if (s_fpRawMouse) { fpStartDInputThread(); fpEnsureDInput(); }
+    bool raw = s_fpRawMouse && s_diReady;
     float dx = 0.0f, dy = 0.0f;
     if (raw) fpTakeMouseAccum(&dx, &dy);
     else
@@ -6693,28 +6893,29 @@ static void normalMouseLookBeforeUpdate(CameraClass* cam, bool controlEnabled)
     }
     SetCursorPos(center.x, center.y);
     s_normalLookCaptured = true;
+    s_normalLookNeedsCheck = true;
     dcUpdateCrosshair(true);
     // Baseline also when switching from warp fallback to raw input. Cursor
     // recentering and mouse movement made in menus can never rotate the view.
     bool accept = wasCaptured && raw == s_normalLookRaw;
     s_normalLookRaw = raw;
+    if (!wasCaptured) normalCaptureDiagnostic(true);
     if (!accept) { s_normalLookYawPending = s_normalLookPitchPending = 0.0f; return; }
     float scale = FP_RAD_PER_PIXEL * s_normalMouseSensitivity;
     float yaw = normalLookSmooth(s_normalLookYawPending, -dx * scale, dt);
-    float pitch = normalLookSmooth(s_normalLookPitchPending, -dy * scale, dt);
-    cam->getCenterNode()->_getDerivedPositionUpdated();
-    cam->getCameraNode()->_getDerivedPositionUpdated();
-    Ogre::Vector3 dir = cam->getCenterNode()->_getDerivedPositionUpdated()
-        - cam->getCameraNode()->_getDerivedPositionUpdated();
-    float length = dir.length();
-    if (!_finite(length) || length < 0.001f) return;
-    dir /= length;
-    float y = dir.y < -1.0f ? -1.0f : (dir.y > 1.0f ? 1.0f : dir.y);
-    float limitedPitch = normalLookPitchDelta(asinf(y), pitch);
-    if (limitedPitch != pitch) s_normalLookPitchPending = 0.0f;
-    cam->getCenterNode()->yaw(Ogre::Radian(yaw), Ogre::Node::TS_WORLD);
-    cam->getCenterNode()->pitch(Ogre::Radian(limitedPitch), Ogre::Node::TS_LOCAL);
-    cam->getCameraNode()->_getFullTransformUpdated();
+    float pitch = normalLookSmooth(s_normalLookPitchPending, dy * scale, dt);
+    s_normalLookDx = dx; s_normalLookDy = dy;
+    s_normalLookPitchRequested = pose.pitch + pitch;
+    s_normalLookPitchClamped = normalLookClampPitch(s_normalLookPitchRequested);
+    if (s_normalLookPitchClamped != s_normalLookPitchRequested) s_normalLookPitchPending = 0.0f;
+    float limitedPitch = s_normalLookPitchClamped - pose.pitch;
+    float yawBefore = 0.0f;
+    bool observed = s_cameraDiagnostics && normalCameraYaw(cam, yawBefore);
+    if (!normalLookWritePose(cam, pose.yaw + yaw, s_normalLookPitchClamped, false))
+    { normalReleaseMouseLook(true); return; }
+    float yawAfter = 0.0f;
+    if (observed && normalCameraYaw(cam, yawAfter))
+        normalYawWriteDiagnostic("mouse", yaw, yawBefore, yawAfter);
     s_normalLookMoved = fabsf(yaw) + fabsf(limitedPitch) > 0.000001f;
     if (s_normalLookMoved)
     {
@@ -6728,7 +6929,7 @@ static bool normalAutoAlignBeforeUpdate(CameraClass* cam, bool controlEnabled, f
     // Ignore portrait cameras before touching any player controller state.
     if (!s_loadGuardActive && !s_dcShutdownInProgress && ou && ou->player
         && cam != ou->player->camera) return false;
-    s_normalSampleDt = s_normalSampleSpeed = s_normalRequestedYaw = 0.0f;
+    s_normalSampleDt = s_normalSampleSpeed = s_normalRequestedYaw = s_normalWrittenYaw = 0.0f;
     s_normalManualInput = false;
     s_normalGate = normalCameraGates(cam, controlEnabled);
     bool allowed = s_normalAutoAlign && s_normalGate == 0;
@@ -6787,10 +6988,12 @@ static bool normalAutoAlignBeforeUpdate(CameraClass* cam, bool controlEnabled, f
     // This is the exact Ogre operation used by native rotationUpdate, without
     // its mouse sensitivity / frame-time scaling. Keep the existing local lens
     // pose and orbit radius: no detach, setPosition, zoom, pitch or follow writes.
+    float yawBeforeWrite = yawBeforeNative;
     cam->getCenterNode()->yaw(Ogre::Radian(delta), Ogre::Node::TS_WORLD);
     cam->getCameraNode()->_getFullTransformUpdated(); // native rotationUpdate does this too
     normalCameraYaw(cam, yawBeforeNative);
     s_normalWrittenYaw = yawBeforeNative;
+    normalYawWriteDiagnostic("auto", delta, yawBeforeWrite, yawBeforeNative);
     return true;
 }
 
@@ -6827,8 +7030,8 @@ static void normalCameraDiagnostic(CameraClass* cam, bool controlEnabled, bool o
         Ogre::Vector3 view = cam->camera->getDerivedDirection();
         if (_finite(view.x) && _finite(view.z)) viewYaw = atan2f(-view.x, -view.z);
     }
-    char b[768];
-    sprintf_s(b, sizeof(b), "[WASDCombat] dc_normal_camera gate=0x%X mode=%d normal=%d master=%d ctl=%d observed=%d fp=%d ots=%d load=%d ptr=%d manual=%d rotate=%d look=%d captured=%d raw=%d override=%llu dt=%.5f speed=%.3f request=%.5f written=%.4f pre=%.4f post=%.4f view=%.4f steer=%d heading=%.4f parent=%p node=%p center=%p anchor=%p movement=%p",
+    char b[896];
+    sprintf_s(b, sizeof(b), "[WASDCombat] dc_normal_camera gate=0x%X mode=%d normal=%d master=%d ctl=%d observed=%d fp=%d ots=%d load=%d ptr=%d manual=%d rotate=%d look=%d captured=%d raw=%d override=%llu dt=%.5f speed=%.3f request=%.5f written=%.4f pre=%.4f post=%.4f view=%.4f steer=%d heading=%.4f init=%d terrain=%d free=%d parent=%p node=%p center=%p anchor=%p movement=%p",
         s_normalGate, (int)s_mode, (int)s_normalAutoAlign, (int)s_autoCameraEnabled, (int)controlEnabled, (int)observed,
         (int)(s_fpActive || s_firstPersonActive), (int)(s_otsCamActive || s_camRotateToggle),
         (int)s_realLoadLatched, (int)s_dcPtrLossActive, (int)s_normalManualInput, (int)cam->isRotating,
@@ -6836,6 +7039,7 @@ static void normalCameraDiagnostic(CameraClass* cam, bool controlEnabled, bool o
         now < s_normalOverrideUntilMs ? s_normalOverrideUntilMs - now : 0,
         s_normalSampleDt, s_normalSampleSpeed, s_normalRequestedYaw, s_normalWrittenYaw, before, after,
         viewYaw, (int)s_steeringIntent, s_steeringYaw,
+        (int)cam->isInitialised(), (int)cam->terrainLoaded, (int)cam->isFreeCameraMode(),
         cam->camera ? cam->camera->getParentSceneNode() : nullptr, cam->getCameraNode(), cam->getCenterNode(),
         s_freeMoveAnchor, s_anchorMovement);
     DebugLog(b);
@@ -6855,6 +7059,7 @@ static void cameraToggleRequests(CameraClass* cam, bool controlEnabled)
     LONG autoRequest = InterlockedExchange(&s_autoCameraToggleRequest, 0);
     LONG lookRequest = InterlockedExchange(&s_normalLookToggleRequest, 0);
     if (s_mode != MODE_FREE_MOVE || !controlEnabled || dcUiWantsCursor()
+        || (gui && gui->isAnyInventoryWindowOpen())
         || !isKenshiForegroundMain() || ou->isLoadingFromASaveGame()) return;
     if (autoRequest & 1)
     {
@@ -6940,6 +7145,16 @@ static void cameraUpdate_hook(CameraClass* thisptr, bool controlEnabled)
     bool observeNormalRotation = normalAutoAlignBeforeUpdate(thisptr, controlEnabled, normalYawBeforeNative);
     s_cameraUpdateOrig(thisptr, ctlEnabled);
     if (normalCapture && key) key->rotate = savedRotate;
+    // Check native keyboard tilt before measuring manual yaw. The final check
+    // also runs on EVERY later return, after restore/watchdog orientation writes.
+    struct NormalLookFinalCheck
+    {
+        CameraClass* cam;
+        NormalLookFinalCheck(CameraClass* c) : cam(c) {}
+        ~NormalLookFinalCheck() { normalMouseLookAfterUpdate(cam); }
+    } normalFinalCheck(thisptr);
+    if (s_normalLookNeedsCheck && normalLookAttached(thisptr))
+        normalLookRecover(thisptr, normalCapture ? 2 : 4);
     manualAttackHudUpdate();    // "Manual Attack" label (self-gated)
     focusMarkersUpdate(thisptr);   // lock dot + weapon glints (self-gated)
 
@@ -7125,9 +7340,9 @@ static void cameraUpdate_hook(CameraClass* thisptr, bool controlEnabled)
                 {
                     thisptr->stopFollowing();
                     ou->player->startTrackCharacter(s_freeMoveAnchor);
-                    Ogre::Quaternion qRt =
-                        Ogre::Quaternion(Ogre::Radian(thisptr->yaw),   Ogre::Vector3::UNIT_Y) *
-                        Ogre::Quaternion(Ogre::Radian(thisptr->pitch), Ogre::Vector3::UNIT_X);
+                    // yaw/pitch are now-zeroed native INPUT deltas, not pose.
+                    // Preserve the actual center orientation when waking follow.
+                    Ogre::Quaternion qRt = thisptr->getCenterNode()->getOrientation();
                     thisptr->manuallySetOrientationAndZoom(qRt, thisptr->altitude);
                     DebugLog("[WASDCombat] dc_cam_follow_woken");
                 }
@@ -8018,30 +8233,13 @@ static void charMovUpdate_hook(CharMovement* thisptr, float time)
         return;
     }
 
-    // Direction-only turns use the public movement API. Never teleport a body
-    // or replace an action animation. W+S cancels translation but can still turn.
-    bool steeringOwns = s_steeringMode && s_steeringValid && s_steeringIntent
+    // Facing accompanies actual movement through the existing speed/animation/
+    // collision path. Cancelled input must never request a stationary turn.
+    bool steeringOwns = dirOk && s_steeringMode && s_steeringValid && s_steeringIntent
         && s_steeringMovement == thisptr && !s_firstPersonActive && !s_fpActive
         && !isCommittedAction(thisptr->getCharacter())
         && !isCommittedCombatClip(thisptr->getCharacter());
     Ogre::Vector3 steeringFacing(-sinf(s_steeringYaw), 0.0f, -cosf(s_steeringYaw));
-    if (steeringOwns && !dirOk)
-    {
-        thisptr->halt();
-        thisptr->animationOverride = false;
-        thisptr->movementMode = MOVE_DIRECTION;
-        thisptr->desiredMotion = thisptr->currentMotion = Ogre::Vector3::ZERO;
-        thisptr->moveLimit = 0.0f;
-        Character* turnChar = thisptr->getCharacter();
-        CombatClass* turnCombat = turnChar ? turnChar->getCombatClass() : nullptr;
-        if (turnCombat) turnCombat->combatModeActive = false;
-        thisptr->faceDirection(steeringFacing);
-        s_charMovUpdateOrig(thisptr, time);
-        thisptr->faceDirection(steeringFacing);
-        s_wasdMovementApplied = true;
-        s_prevWasdDir = Ogre::Vector3::ZERO;
-        return;
-    }
 
     if (dirOk)
     {
@@ -9551,7 +9749,7 @@ static void steeringFrame()
         || ch->isRagdoll() || ch->isBeingCarried()
         || isCommittedAction(ch) || isCommittedCombatClip(ch))
     { s_steeringValid = false; return; }
-    bool held = s_wHeld || s_aHeld || s_sHeld || s_dHeld;
+    bool held = !(s_wHeld && s_sHeld) && (s_wHeld || s_sHeld || (s_aHeld != s_dHeld));
     if (!s_steeringValid || s_steeringAnchor != ch || s_steeringMovement != s_anchorMovement || !held)
     {
         Ogre::Vector3 facing = s_anchorMovement->getFacingDirection();

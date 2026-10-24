@@ -151,25 +151,26 @@ combinations. Check other mods and your own bindings when choosing replacements;
 the existing duplicate-DC-key warning also covers these two roles.
 
 With **`SteeringMode=true`**, your configured forward/backward keys move along
-an independent character heading. Left/right continuously steer that heading;
-forward+left/right makes a curved path, backward reverses velocity, and opposing
-forward/backward or left/right inputs cancel. Camera rotation never supplies
+an independent character heading. Left/right alone move forward along a
+continuously turning heading; forward+left/right also makes a curved path.
+Backward reverses velocity. Opposing forward/backward inputs cancel movement
+and turning; left+right cancel turning (and movement when pressed alone). Camera rotation never supplies
 the steering yaw. `SteeringTurnSpeed` is degrees per real second (10–360,
 default 90). It advances once per world frame; stalls longer than 250 ms and
 resume frames do not accumulate catch-up turns. First person retains its
 existing gaze-relative movement.
 
-Left/right alone requests a stationary turn through the public
-`CharMovement::faceDirection()` API, with direct-motion translation zeroed.
-No body teleport, skeleton rotation or forced turn animation is used. The API
-supports a facing request, but its visible turn-in-place and backward animation
-behavior still needs testing on actual characters/races in Kenshi. Committed
+Left/right alone use the same `setDirectMovement()` path, speed limits, native
+locomotion update and accompanying `faceDirection()` request as forward movement.
+The former stationary-turn path has been removed. Visible curved movement,
+backward animation and collision still need testing on actual characters/races
+in Kenshi. Committed
 actions and protected states retain control of the body. Crawling, leaving
 furniture and slave-order locomotion use the established camera-relative path
 instead of forcing standing steering into those special cases.
 
 While steering keys are held, automatic follow prefers the steering heading,
-including stationary turns and backward travel, so S does not ask the camera
+including curved A/D-only movement and backward travel, so S does not ask the camera
 to flip 180 degrees. Otherwise it uses validated measured horizontal travel,
 including point-and-click travel, and stops rotating when travel stops.
 `NormalAutoAlignSpeed` and `OtsAutoAlignSpeed` are exponential turn response per
@@ -183,8 +184,9 @@ retains that original strafe behavior.
 sets its launch preference; runtime changes last for the session. The existing
 Kenshi orbit stays attached to the followed character. Relative input is smoothed
 with a short time-based response; `NormalMouseLookSensitivity` is 0.1–5. The
-normal orbit pitch is limited to 5–80 degrees below horizontal, without snapping
-an existing out-of-range vanilla pose back into range. Wheel zoom, tracking,
+normal orbit pitch has an absolute hard clamp at 10–75 degrees below horizontal.
+Capture repairs an out-of-range or inverted pose to an upright native basis.
+Wheel zoom, tracking,
 native terrain processing and interaction commands remain active.
 
 Hold **ALT** for a regular pointer and vanilla selection/click behavior. Normal
@@ -196,23 +198,109 @@ on. Entry/resume, owner/focus changes and raw-input acquisition discard a baseli
 sample, avoiding recenter/backlog turns. FP and detached OTS keep their existing
 mouse consumers; the normal mode does not consume their accumulator samples.
 
+### Normal mouse-look pitch correction
+
+Normal F10 activation and mouse response have been confirmed in-game. The
+subsequent inverted/under-ground pitch bug is corrected in source and regression
+tests; **this pitch correction still needs an in-game playtest**.
+
+The native attached rig is `center -> lens node -> Ogre camera`. The center owns
+both world-Y yaw and local-X pitch. The lens sits on local **-Z**, while the
+camera's local orientation looks along **+Z**. Positive center pitch therefore
+means looking **down**. The old code clamped negative view elevation as though
+adding a local pitch rotation increased that elevation. Its sign was reversed;
+`asin(direction.y)` also folded angles after vertical and could not identify an
+inverted up vector. Once corrupted, F10 OFF merely stopped input and left the
+bad quaternion behind. A position-based elevation sample could additionally be
+affected by native collision/zoom displacement.
+
+Normal look now reads actual derived center orientation each frame, measures
+positive down-pitch with `atan2`, clamps the absolute target before any rotation,
+and writes normalized `worldYaw * localPitch` with zero roll. It converts back
+through the center parent's orientation, preserving an upright world basis even
+under a rotated parent. No accumulated pitch offset is kept. Entry, ALT release,
+load/mode transitions and focus/raw-input changes still discard the first mouse
+sample. Saturating a pitch boundary clears pending vertical smoothing so reversal
+responds immediately.
+
+Recovery checks run before native update, immediately after it, and at hook exit
+after later restore/watchdog writes. They repair invalid/inverted poses on the
+current attached player rig, including F10/V exit; they never dereference a saved
+camera pointer during loading or take over detached FP/OTS. The normal 30-degree
+constructor pitch is the inversion/nonfinite fallback. Recovery restores native
+lens/camera orientations only if their optical basis is corrupt; native positions,
+zoom, follow, collision and FOV remain owned by Kenshi. The existing follow-wake
+path now reuses the center's actual quaternion instead of interpreting the
+zeroed `CameraClass::yaw/pitch` input deltas as an absolute pose.
+
+With `CameraDiagnostics=true`, `dc_normal_pitch` adds a sample at most once per
+second, independent of `VerboseLog`. It includes mouse dx/dy, native input and
+remaining yaw/pitch deltas, absolute pitch before/requested/clamped, derived rig
+yaw/pitch, actual camera quaternion/direction/world-up, roll, validity and
+inversion/recovery flags. Angles are radians; native delta pairs are yaw,pitch.
+`worldUp` is the camera's up vector in world coordinates and `upY` is its dot
+product with world +Y. Recovery bits are `0x1` pre-native, `0x2` post-native/final,
+`0x4` release and `0x8` inversion/nonfinite detection; events stay latched until
+the next diagnostic sample. The final sample reports the corrected orientation.
+
+Native RVAs, orientation derivation, remaining playtest checks and regression
+coverage are recorded in [tests/normal_camera_native_rig.md](tests/normal_camera_native_rig.md).
+
 ### NormalAutoAlign investigation and runtime diagnostics
 
-The reported V-only failure has **not been confirmed fixed in-game**. The
-installed INI was read and contained `NormalAutoAlign=true` and `OtsAutoAlign=true`.
-The installed log showed the camera hook being installed successfully, but had
-no per-frame evidence of eligibility, movement samples or native yaw ownership.
-No installed files were modified.
+The real runtime log now identifies a persistent `gate=0x400`, with normal
+mouse-look enabled but `captured=0`, and the native structure `parent == node`
+with a distinct center. In the failing source, `0x400` was exactly:
 
-Inspection of KenshiLib and the original 1.0.65 executable retained by RE_Kenshi
-confirms that native `rotationUpdate()` yaws the orbit center in world space and
-that `CameraClass::yaw/pitch` are transient inputs consumed by native update.
-`getFacingDirection()` reads cached derived positions. The controller now refreshes
-both position caches before using that heading. It also fixes a source-level
-feedback error: previously **every** heading change across native update extended
-the manual override and changed the held movement reference. Now only actual
-manual rotation input can do that. These fixes address demonstrable weaknesses;
-they do not establish which gate or write caused the reported runtime failure.
+```cpp
+if (!cam->isInitialised() || !cam->terrainLoaded || cam->isFreeCameraMode())
+    gates |= 1024;
+```
+
+The attachment mismatch was a separate `0x800` bit, set when `parent != node`.
+The logged equal pointers therefore PASSED that ownership check. Both normal
+mouse capture and auto-alignment returned before consuming input/sampling travel
+because they required `normalCameraGates() == 0`.
+
+Read-only inspection of `KenshiLib/Include/kenshi/CameraClass.h` and the original
+1.0.65 executable retained in `RE_Kenshi/kenshi_GOG_x64.exe` establishes:
+
+| Native evidence (RVA) | Meaning |
+| --- | --- |
+| Constructor `0x6AF44E`: clears the word at `this + 0x20` | Both `initialised` and `terrainLoaded` start false, although the constructor creates the rig. |
+| Constructor `0x6AF599` through `0x6AF60F` | Creates the lens node under the center, stores it at `+0x70`, and calls `Ogre::SceneNode::attachObject(node, camera)`. `parent == node` is the native attachment. |
+| `isInitialised`, `0xA19880` | Reads only byte `+0x20`; it does not inspect scene nodes or camera attachment. |
+| `manuallySetOrientationAndZoom`, `0x6AE1C7` | Sets `initialised` after applying a pose. This flag cannot prove scene lifetime. |
+| `isFreeCameraMode`, `0x6ADD90` | Reads the independent free-camera flag at `+0xBF`. |
+| Native `update`, `0x6B05E0` | Normal following/rotation does not require the two readiness flags; free-camera mode branches to a different update. |
+
+The fix removes the two unsupported readiness requirements. It retains all
+world/loading, player-camera, character liveness/movement ownership, UI/focus,
+follow-target and explicit free-camera gates. Structural validation requires
+the native `center -> node -> camera` chain, non-null distinct center/lens nodes,
+and the correct lens parent. It continues rejecting detached/foreign rigs.
+
+The old combined log alone does **not** identify which boolean produced `0x400`.
+A read-only snapshot of the already running game on 2026-10-24 resolved that
+uncertainty: `initialised=1`, **`terrainLoaded=0`**, `freeCameraMode=0`. It followed
+the exported `ou` pointer through `GameWorld::player` (`+0x580`) and
+`PlayerInterface::camera` (`+0x30`), then read the header-defined camera fields.
+The native center (`0x53D13660`) and lens node (`0x53D1CFB0`) matched the current
+session's earlier normal-mode `gate=0x400` log samples. OTS was active at snapshot
+time; no mode, input, pointer or camera state was changed to collect it. This
+demonstrates the bad `!terrainLoaded` operand on the same gameplay rig; it is not
+a playtest of the rebuilt DLL. The new sample also exposes `init`, `terrain` and
+`free` separately. That snapshot did not itself validate the rebuilt DLL. The
+user has since confirmed normal F10 activation and mouse movement; the newer
+pitch correction above remains untested in-game. The build and regression runner
+write to the project workspace only.
+
+Normal look uses the existing OTS/FP DirectInput device, polling thread and atomic
+accumulator, respecting `[FirstPerson] RawMouse` and the same cursor-warp fallback.
+It consumes one sample only when normal mode owns input, discards entry/resume
+samples, and uses the shared crosshair/cursor lifecycle. It does not detach or
+change camera zoom, collision, tracking, FOV or perspective. F6 affects automatic
+following only; mouse-look also works with `NormalAutoAlign=false`.
 
 To collect evidence after installing a test build yourself:
 
@@ -223,21 +311,25 @@ To collect evidence after installing a test build yourself:
    run, including A/D alone and S. Use F6 to test follow off/on.
 3. Copy `RE_Kenshi_log.txt` from the Kenshi directory after exiting. Include
    `dc_camera_config`, `dc_camera_controls`, `dc_normal_camera`,
-   `dc_camera_guard` and the toggle lines. Turn diagnostics off afterward.
+   `dc_camera_guard`, `dc_normal_capture`, `dc_normal_yaw_write` and the toggle
+   lines. Turn diagnostics off afterward.
 
-Diagnostics are independent of `VerboseLog` and emit at most one camera sample
-per second, plus startup configuration and toggle events. The startup line gives
+Diagnostics are independent of `VerboseLog`. Each of camera samples, capture
+transitions and yaw-write observations is limited to one line per second, plus
+startup configuration and toggle events. The startup line gives
 the exact loaded INI path and resolved values. Runtime samples include the
 configuration/master, control/UI gates, cursor/raw state, manual override time,
 sample dt/speed, requested yaw, yaw immediately after the write, yaw across native
 update, rendered view yaw, steering heading, and camera/anchor ownership pointers.
-`written` is meaningful when `request` is nonzero. Yaws/deltas are radians.
+`written` is reset when there is no auto write. `dc_normal_yaw_write` identifies
+`source=mouse` or `source=auto` and reports the requested delta, measured headings
+before/after the write and their wrapped `actual` delta. Yaws/deltas are radians.
 
 The `gate` mask adds these reasons (hex): `0x1` inactive mode/load/world guard;
 `0x2` non-player camera; `0x4` paused; `0x8` engine control disabled; `0x10`
 UI/inventory; `0x20` plugin UI/turret suspension; `0x40` background; `0x80` anchor
 not live; `0x100` movement mismatch; `0x200` incapacitated/protected character;
-`0x400` camera unready/free-camera; `0x800` rig/parent mismatch; `0x1000` follow
+`0x400` explicit free-camera mode; `0x800` missing/aliased nodes or rig/parent mismatch; `0x1000` follow
 target mismatch. A stuck load guard has its own pointer-safe heartbeat. Preview
 cameras do not reset the player's history or generate normal sample lines.
 
@@ -250,14 +342,24 @@ against fake input/game/Ogre APIs using VC++ 2010 x64:
 uv run --no-project python tests/run_normal_camera_tests.py
 ```
 
-They cover steering time scaling and view independence, backwards/cancelled
-intent, stationary heading follow, tuning validation, runtime toggles and held
-movement, normal alignment/manual priority, capture/release/resume and accumulator
-ownership, pitch/smoothing, discontinuities, liveness, UI/load/focus gates, and
+They cover the observed `parent == node != center` structure with all four
+readiness-flag combinations (including both false), invalid/detached rigs,
+steering time scaling and camera independence, nonzero translation and turn for
+A/D-only and W+A/D arcs, backwards/cancelled intent, original strafe behavior,
+tuning validation, F10 capture/release, F6 and auto-align-setting independence,
+raw/fallback handoffs, ALT/UI/focus release/resume, accumulator ownership,
+rate-limited capture/yaw diagnostics, normal alignment/manual priority,
+pitch/smoothing, discontinuities, liveness, UI/load/focus gates, and
 shipped/generated INI defaults. These are controller regressions, not evidence of
 actual Ogre rendering, character animation or collision behavior in the game.
+The camera fixture now performs quaternion and hierarchical position transforms,
+using native -Z lens placement and +Z optics. Pitch regressions exercise repeated
+million-pixel input in both directions, more than six full yaw turns at fixed
+pitch, all F6/auto-align combinations, baseline recapture, collision-offset and
+parent-space independence, post-native/final recovery, F10/V exit, nonfinite and
+rolled optics, and rate-limited pitch diagnostics.
 
-In-game checks remain required: V-only/OTS curved runs, S and A/D-only turns,
+In-game checks remain required: V-only/OTS curved runs, S and A/D-only arcs,
 custom movement/camera keys, mouse-look/ALT selection and loot, wheel zoom and
 terrain/interior collision, map/dialogue/inventory/pause, focus/minimize/restore,
 character changes/save loading, first person, and existing manual combat.

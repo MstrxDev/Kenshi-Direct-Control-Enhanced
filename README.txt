@@ -70,23 +70,30 @@ OPTIONAL STEERING AND NORMAL MOUSE-LOOK
   CameraDiagnostics = false
 
   Set SteeringMode=true for character-relative W/S and continuous A/D
-  turning in normal and OTS modes. Turn speed is degrees per real second
+  curved movement in normal and OTS modes. Turn speed is degrees per real second
   (10-360). First person retains its existing movement. Crawl, furniture
   and slave-order locomotion retain their established movement paths.
-  A/D alone requests facing through the game API with zero translation;
-  actual turn/backward animations still require in-game validation.
+  A/D alone and W+A/D move forward along the turning character heading.
+  They use the existing movement/speed/animation/collision path. Actual
+  curved movement and backward animations still require in-game validation.
 
   Set NormalAutoAlign=true and/or OtsAutoAlign=true for automatic follow
   in each view. F6 is a session master; it respects these separate settings.
   Steering follows character heading while keys are held, including S
-  and stationary turns. Otherwise automatic follow uses measured travel.
+  and A/D-only arcs. Otherwise automatic follow uses measured travel.
 
   F10 changes the normal-camera mouse-look preference for this session.
   NormalMouseLook sets its launch preference. Hold ALT to restore the
   pointer and vanilla clicks. UI, inventory, pause, focus loss, loading
   and mode changes release capture; eligible gameplay resumes it if on.
   Sensitivity range: 0.1-5. Native zoom/tracking/terrain processing remains.
-  Mouse orbit pitch: 5-80 degrees below horizontal. FP/OTS are separate.
+  Mouse orbit pitch: absolute 10-75 degrees below horizontal, no roll.
+  Invalid/inverted orientation is repaired on capture, after native update
+  and on F10/V exit. Native +Z optics require positive center pitch down.
+  ALT/reentry discards the first mouse sample and reads the actual rig pose.
+  Normal F10 activation is confirmed; this pitch correction needs playtesting.
+  FP/OTS are separate.
+  Shares OTS/FP raw input and cursor fallback; F6 OFF does not disable look.
 
   F7 conflicts with Kenshi's HUD toggle; F8 takes screenshots. Plain F6
   and F10 were free in the checked controls.cfg. Modified combinations
@@ -95,10 +102,19 @@ OPTIONAL STEERING AND NORMAL MOUSE-LOOK
   do not. Runtime toggle states are not saved across game restarts.
 
   The reported NormalAutoAlign failure is NOT verified fixed in-game.
+  The logged 0x400 was an unsupported initialised/terrainLoaded readiness
+  check (also combined with the valid free-camera check). A read-only live
+  snapshot found initialised=1, terrainLoaded=0, freeCameraMode=0, identifying
+  !terrainLoaded as the bad operand. The logged parent==node is VALID.
+  Readiness now uses the native attachment and existing lifetime/ownership
+  guards. See README.md for the native-code evidence and log limitations.
   CameraDiagnostics=true logs loaded values and camera state at most
   once/second to RE_Kenshi_log.txt, independently of VerboseLog. See
   README.md for collection steps, gate-mask meanings, regression tests,
   source-level fixes and the remaining runtime playtest checklist.
+  dc_normal_pitch adds mouse/native input, absolute clamp, derived orientation,
+  world-up/roll and latched recovery flags at most once per second. Native
+  rig evidence and pitch checks: tests/normal_camera_native_rig.md.
 
 
 FEATURES

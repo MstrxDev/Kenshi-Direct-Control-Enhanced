@@ -26,7 +26,10 @@ state = source.split("// Normal V-only camera:", 1)[1].split(
 state = state[state.index("static bool"):]
 names = ["otsWrapYaw", "normalResetAutoAlign", "normalMovementReferenceYaw",
          "computeWASDDirection", "steeringAdvanceYaw", "normalCameraYaw", "normalCameraGates",
-         "normalLookSmooth", "normalLookPitchDelta", "normalReleaseMouseLook",
+         "normalLookSmooth", "normalLookClampPitch", "normalLookQuaternionValid",
+         "normalLookReadPose", "normalLookPoseSafe", "normalLookAttached", "normalLookWritePose",
+         "normalLookRecover", "normalLookPitchDiagnostic", "normalMouseLookAfterUpdate", "normalCaptureDiagnostic",
+         "normalYawWriteDiagnostic", "normalReleaseMouseLook",
          "normalMouseLookBeforeUpdate", "normalAutoAlignBeforeUpdate",
          "normalAutoAlignAfterUpdate", "cameraToggleRequests", "steeringFrame", "readCameraFloat"]
 (OUT / "normal_camera_under_test.h").write_text(
@@ -65,4 +68,21 @@ hook = source.split("static void cameraUpdate_hook(", 1)[1].split("// ANY open U
 assert hook.index("normalMouseLookBeforeUpdate(") < hook.index("normalAutoAlignBeforeUpdate(") < hook.index("s_cameraUpdateOrig(thisptr")
 assert "if (key) key->rotate = false" in hook
 assert "if (normalCapture && key) key->rotate = savedRotate" in hook
+assert hook.index("s_cameraUpdateOrig(thisptr") < hook.index("~NormalLookFinalCheck() { normalMouseLookAfterUpdate(cam); }")
+assert "Ogre::Quaternion qRt = thisptr->getCenterNode()->getOrientation();" in source
+assert "getCenterNode()->pitch(" not in function("normalMouseLookBeforeUpdate")
+# Normal look owns one atomic drain only after its eligibility gate; FP/OTS
+# retain the original thread/device/accumulator. Native update remains enabled.
+look = function("normalMouseLookBeforeUpdate")
+assert look.count("fpTakeMouseAccum(") == 1
+assert look.index("if (!allowed)") < look.index("fpTakeMouseAccum(")
+assert "s_autoCameraEnabled" not in look and "s_normalAutoAlign" not in look
+assert "if (s_fpRawMouse) { fpStartDInputThread(); fpEnsureDInput(); }" in look
+assert "bool ctlEnabled = (s_fpActive || s_firstPersonActive) ? false : controlEnabled;" in hook
+movement = source.split("bool steeringOwns = dirOk &&", 1)[1].split("// Post-original re-assert", 1)[0]
+assert "steeringOwns && !dirOk" not in source
+assert "thisptr->setDirectMovement(wasdDir, limit)" in movement
+assert "float limit     = wasdMoveLimit(turning)" in movement
+assert "s_charMovUpdateOrig(thisptr, time)" in movement
 print("PASS: shipped defaults, generated defaults and INI load keys agree")
+print("PASS: single normal input consumer, native update and movement integration wiring")
