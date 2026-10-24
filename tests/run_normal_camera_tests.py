@@ -1,0 +1,53 @@
+"""Compile the actual camera controller functions against a small fake game API.
+
+Run: uv run --no-project python tests/run_normal_camera_tests.py
+Requires the same VC++ 2010 x64 compiler and Windows 7.1 SDK as the plugin.
+No game process is started and no installed mod files are written.
+"""
+from pathlib import Path
+import os
+import re
+import subprocess
+
+ROOT = Path(__file__).resolve().parents[1]
+OUT = ROOT / "x64" / "Release" / "normal-camera-tests"
+OUT.mkdir(parents=True, exist_ok=True)
+source = (ROOT / "WASDCombatPlugin.cpp").read_text(encoding="utf-8-sig")
+
+def function(name):
+    match = re.search(r"^static [^\n]+\b" + name + r"\([^\n]*\)\n\{.*?^\}",
+                      source, re.M | re.S)
+    if not match:
+        raise RuntimeError("Production function not found: " + name)
+    return match.group(0)
+
+state = source.split("// Normal V-only camera:", 1)[1].split(
+    "static void normalResetAutoAlign()", 1)[0]
+state = state[state.index("static bool"):]
+names = ["otsWrapYaw", "normalResetAutoAlign", "normalMovementReferenceYaw",
+         "computeWASDDirection", "normalCameraYaw", "normalAutoAlignBeforeUpdate",
+         "normalAutoAlignAfterUpdate"]
+(OUT / "normal_camera_under_test.h").write_text(
+    state + "\n" + "\n\n".join(function(name) for name in names), encoding="utf-8")
+
+vc = Path(os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)")) / "Microsoft Visual Studio 10.0" / "VC"
+sdk = Path(os.environ.get("ProgramFiles", r"C:\Program Files")) / "Microsoft SDKs" / "Windows" / "v7.1"
+env = os.environ.copy()
+env["INCLUDE"] = str(vc / "include") + ";" + str(sdk / "Include")
+env["LIB"] = str(vc / "lib" / "amd64") + ";" + str(sdk / "Lib" / "x64")
+compiler = vc / "bin" / "amd64" / "cl.exe"
+subprocess.run([str(compiler), "/nologo", "/W3", "/EHsc", "/MD", "/O2",
+                "/I" + str(OUT), str(ROOT / "tests" / "normal_camera_alignment_test.cpp"),
+                "/Fe" + str(OUT / "normal_camera_tests.exe"),
+                "/Fo" + str(OUT / "normal_camera_tests.obj")],
+               cwd=OUT, env=env, check=True)
+subprocess.run([str(OUT / "normal_camera_tests.exe")], cwd=OUT, check=True)
+
+# Both shipped and generated defaults must stay opt-in, with the same key names.
+ini = (ROOT / "WASDCombatPlugin.ini").read_text(encoding="utf-8-sig")
+for name, default in [("NormalAutoAlign", "false"), ("NormalAutoAlignSpeed", "4.0"),
+                      ("NormalManualOverrideMs", "600")]:
+    assert re.search(r"^" + name + r"\s*=\s*" + re.escape(default) + r"$", ini, re.M)
+    assert '"' + name + ' = ' + default + r'\r\n"' in source
+    assert '"Settings", "' + name + '", "' + default + '"' in source
+print("PASS: shipped defaults, generated defaults and INI load keys agree")

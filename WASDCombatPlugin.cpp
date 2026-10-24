@@ -339,6 +339,31 @@ static void otsResetAutoAlign()
     s_otsMouseOverrideUntilMs = 0;
 }
 
+// Normal V-only camera: independent state; never borrows the detached OTS yaw.
+static bool             s_normalAutoAlign = false;
+static float            s_normalAutoAlignSpeed = 4.0f;
+static DWORD            s_normalManualOverrideMs = 600;
+static CameraClass*     s_normalAlignCamera = nullptr;
+static Character*       s_normalAlignAnchor = nullptr; // identity only
+static CharMovement*    s_normalAlignMovement = nullptr;
+static bool             s_normalMoveRefValid = false;
+static float            s_normalMoveRefYaw = 0.0f;
+static LONG             s_normalMoveRefGesture = 0;
+static Ogre::Vector3    s_normalAlignLastPos(0.0f, 0.0f, 0.0f);
+static LONGLONG         s_normalAlignLastTick = 0;
+static ULONGLONG        s_normalOverrideUntilMs = 0;
+
+static void normalResetAutoAlign()
+{
+    s_normalAlignCamera = nullptr;
+    s_normalAlignAnchor = nullptr;
+    s_normalAlignMovement = nullptr;
+    s_normalMoveRefValid = false;
+    s_normalMoveRefGesture = 0;
+    s_normalAlignLastTick = 0;
+    s_normalOverrideUntilMs = 0;
+}
+
 static Ogre::SceneNode* s_otsNode          = nullptr; // our camera's own node
 static float            s_otsYaw           = 0.0f;    // our look yaw (own, not engine)
 static float            s_otsPitch         = 0.15f;   // our look pitch (+down)
@@ -1384,6 +1409,11 @@ static void writeDefaultConfig(const char* path)
         "GlintPx                = 22\r\n"
         "; Detailed log for bug reports (writes every combat/movement event).\r\n"
         "VerboseLog             = false\r\n"
+        "; Normal game camera (V only). INI-only; restart after editing.\r\n"
+        "NormalAutoAlign = false\r\n"
+        "; Turn response per second (0.1-20); manual rotation override ms (0-10000).\r\n"
+        "NormalAutoAlignSpeed = 4.0\r\n"
+        "NormalManualOverrideMs = 600\r\n"
         "; CTRL third-person camera: distance / height / shoulder offset.\r\n"
         "OtsDistance      = 20\r\n"
         "OtsHeight        = 15.0\r\n"
@@ -1788,6 +1818,26 @@ static void loadKeybinds()
         if (overrideMs > 10000.0) overrideMs = 10000.0;
         s_otsMouseOverrideMs = (DWORD)overrideMs;
         otsResetAutoAlign();
+
+        GetPrivateProfileStringA("Settings", "NormalAutoAlign", "false", mbuf, sizeof(mbuf), path);
+        s_normalAutoAlign = parseBool(mbuf, false);
+        GetPrivateProfileStringA("Settings", "NormalAutoAlignSpeed", "4.0", mbuf, sizeof(mbuf), path);
+        alignEnd = nullptr;
+        alignSpeed = strtod(mbuf, &alignEnd);
+        while (alignEnd != mbuf && isspace((unsigned char)*alignEnd)) ++alignEnd;
+        if (!_finite(alignSpeed) || alignEnd == mbuf || *alignEnd) alignSpeed = 4.0;
+        if (alignSpeed < 0.1) alignSpeed = 0.1;
+        if (alignSpeed > 20.0) alignSpeed = 20.0;
+        s_normalAutoAlignSpeed = (float)alignSpeed;
+        GetPrivateProfileStringA("Settings", "NormalManualOverrideMs", "600", mbuf, sizeof(mbuf), path);
+        overrideEnd = nullptr;
+        overrideMs = strtod(mbuf, &overrideEnd);
+        while (overrideEnd != mbuf && isspace((unsigned char)*overrideEnd)) ++overrideEnd;
+        if (!_finite(overrideMs) || overrideEnd == mbuf || *overrideEnd) overrideMs = 600.0;
+        if (overrideMs < 0.0) overrideMs = 0.0;
+        if (overrideMs > 10000.0) overrideMs = 10000.0;
+        s_normalManualOverrideMs = (DWORD)overrideMs;
+        normalResetAutoAlign();
     }
 
     // [FirstPerson] tunables — read via the shared helper (also called on every
@@ -2893,6 +2943,7 @@ static void otsRestoreNames();   // fwd decl — defined with the OTS camera cod
 static void clearAllState()
 {
     otsResetAutoAlign();
+    normalResetAutoAlign();
     s_mode              = MODE_VANILLA;
     s_wHeld             = false;
     s_aHeld             = false;
@@ -3123,6 +3174,36 @@ static float otsMovementReferenceYaw(bool wasdHeld)
     return s_otsMoveRefYaw;
 }
 
+// Freeze one basis across overlapping held keys (including W->D). A new
+// release/re-press gesture adopts the current view. The poll serial is shared
+// with OTS, but the reference and every other piece of state are independent.
+static float normalMovementReferenceYaw(CameraClass* cam, float viewYaw, bool wasdHeld)
+{
+    if (s_normalAlignCamera != cam || s_normalAlignAnchor != s_freeMoveAnchor
+        || s_normalAlignMovement != s_anchorMovement)
+    {
+        normalResetAutoAlign();
+        s_normalAlignCamera = cam;
+        s_normalAlignAnchor = s_freeMoveAnchor;
+        s_normalAlignMovement = s_anchorMovement;
+    }
+    if (!wasdHeld || s_mode != MODE_FREE_MOVE || s_loadGuardActive
+        || s_dcShutdownInProgress || s_dcPtrLossActive || s_camRotateUiOpen
+        || s_menuSuspendActive || s_cameraLockTurretSuspend || s_lootUiSuspendActive)
+    {
+        s_normalMoveRefValid = false;
+        return viewYaw;
+    }
+    LONG gesture = s_otsGestureSerial;
+    if (!s_normalMoveRefValid || gesture != s_normalMoveRefGesture)
+    {
+        s_normalMoveRefYaw = viewYaw;
+        s_normalMoveRefGesture = gesture;
+        s_normalMoveRefValid = true;
+    }
+    return s_normalMoveRefYaw;
+}
+
 static bool computeWASDDirection(bool bW, bool bA, bool bS, bool bD, Ogre::Vector3& outDir)
 {
     if (!ou) return false;
@@ -3146,6 +3227,14 @@ static bool computeWASDDirection(bool bW, bool bA, bool bS, bool bD, Ogre::Vecto
     {
         camFwd = ou->player->camera->getFacingDirection();
         s_lastCamFwd = camFwd;
+        if (s_normalAutoAlign && !s_fpActive && !s_camRotateToggle
+            && _finite(camFwd.x) && _finite(camFwd.z)
+            && camFwd.x * camFwd.x + camFwd.z * camFwd.z > 0.000001f)
+        {
+            float yaw = normalMovementReferenceYaw(ou->player->camera,
+                atan2f(-camFwd.x, -camFwd.z), bW || bA || bS || bD);
+            camFwd = Ogre::Vector3(-sinf(yaw), 0.0f, -cosf(yaw));
+        }
     }
     else
     {
@@ -6346,8 +6435,114 @@ static void dcDriveFloorReveal()
     }
 }
 
-// CameraClass::update hook — runs AFTER the game's camera update, BEFORE
-// render: this is the only point whose writes survive to the frame.
+// CameraClass::update integration: normal alignment runs before native camera
+// processing; detached OTS / FP drivers run after it, before scene rendering.
+static bool normalCameraYaw(CameraClass* cam, float& yaw)
+{
+    // CameraClass::yaw/pitch are transient input deltas, zeroed by
+    // rotationUpdate. Use the same actual orbit heading as normal WASD.
+    Ogre::Vector3 forward = cam->getFacingDirection();
+    if (!_finite(forward.x) || !_finite(forward.z)
+        || forward.x * forward.x + forward.z * forward.z < 0.000001f) return false;
+    yaw = atan2f(-forward.x, -forward.z);
+    return true;
+}
+
+// Apply before orig so native following, zoom, terrain/collision constraints,
+// audio and cursor handling all run on the rotated rig in the same update.
+// Returns a post-auto/pre-native heading to measure intentional rotation only.
+static bool normalAutoAlignBeforeUpdate(CameraClass* cam, bool controlEnabled, float& yawBeforeNative)
+{
+    // Order matters: establish world/anchor liveness before dereferencing them.
+    bool active = s_normalAutoAlign && s_mode == MODE_FREE_MOVE
+        && !s_fpActive && !s_firstPersonActive && !s_otsCamActive && !s_camRotateToggle
+        && !s_otsRestorePending && !s_loadGuardActive && !s_dcShutdownInProgress
+        && !s_dcPtrLossActive && !s_realLoadLatched && ou
+        && !ou->isLoadingFromASaveGame() && ou->player;
+    if (!active) { normalResetAutoAlign(); return false; }
+    // Portrait/preview camera updates must not reset the player's travel history.
+    if (cam != ou->player->camera) return false;
+    bool allowed = !ou->isPaused()
+        && controlEnabled && !dcUiWantsCursor()
+        && !(gui && gui->isAnyInventoryWindowOpen()) // also move-through inventory
+        && !s_menuSuspendActive && !s_cameraLockTurretSuspend && !s_lootUiSuspendActive
+        && isKenshiForegroundMain() && s_freeMoveAnchor && s_gwFrame
+        && dcInUpdateList(s_gwFrame, s_freeMoveAnchor)
+        && s_anchorMovement && s_anchorMovement == s_freeMoveAnchor->movement
+        && !s_freeMoveAnchor->isDead() && !s_freeMoveAnchor->isUnconcious()
+        && !isProtectedAnimationState(s_freeMoveAnchor)
+        && !s_freeMoveAnchor->isRagdoll() && !s_freeMoveAnchor->isBeingCarried()
+        && cam->isInitialised() && cam->terrainLoaded && !cam->isFreeCameraMode()
+        && cam->camera && cam->getCenterNode() && cam->getCameraNode()
+        && cam->camera->getParentSceneNode() == cam->getCameraNode()
+        && cam->getFollowObject() == s_freeMoveAnchor;
+    if (!allowed || !normalCameraYaw(cam, yawBeforeNative))
+    {
+        normalResetAutoAlign();
+        return false;
+    }
+
+    normalMovementReferenceYaw(cam, yawBeforeNative, s_wHeld || s_aHeld || s_sHeld || s_dHeld);
+    // Respect both mouse rotation (even held still) and native keyboard yaw /
+    // tilt. Combat Q/E flags have already been filtered by cameraUpdate_hook.
+    bool manual = cam->isRotating || (key && (key->rotate || key->rotLeft || key->rotRight
+        || key->tiltUp || key->tiltDown));
+    ULONGLONG now = GetTickCount64();
+    if (manual) s_normalOverrideUntilMs = now + s_normalManualOverrideMs;
+
+    static LONGLONG frequency = 0;
+    if (!frequency)
+    {
+        LARGE_INTEGER freq;
+        if (QueryPerformanceFrequency(&freq)) frequency = freq.QuadPart;
+    }
+    LONGLONG tick = qpcNow();
+    Ogre::Vector3 pos = s_anchorMovement->pos;
+    if (!frequency || !_finite(pos.x) || !_finite(pos.y) || !_finite(pos.z))
+    {
+        s_normalAlignLastTick = 0;
+        return true;
+    }
+    float dt = s_normalAlignLastTick
+        ? (float)((double)(tick - s_normalAlignLastTick) / (double)frequency) : 0.0f;
+    Ogre::Vector3 step = pos - s_normalAlignLastPos;
+    s_normalAlignLastPos = pos;
+    s_normalAlignLastTick = tick;
+    float stepSq = step.squaredLength();
+    // No stale target while stationary/blocked. Re-seed after a stall or warp.
+    if (dt < 0.0001f || dt > 0.25f || !_finite(stepSq) || stepSq > 400.0f) return true;
+    step.y = 0.0f;
+    float horizontalSq = step.squaredLength();
+    float speedSq = horizontalSq / (dt * dt);
+    if (horizontalSq < 0.000004f || speedSq < 0.25f || speedSq > 1440000.0f
+        || manual || now < s_normalOverrideUntilMs) return true;
+
+    float targetYaw = atan2f(-step.x, -step.z);
+    float turnDt = dt > 0.05f ? 0.05f : dt;
+    float delta = otsWrapYaw(targetYaw - yawBeforeNative)
+        * (1.0f - expf(-s_normalAutoAlignSpeed * turnDt));
+    // This is the exact Ogre operation used by native rotationUpdate, without
+    // its mouse sensitivity / frame-time scaling. Keep the existing local lens
+    // pose and orbit radius: no detach, setPosition, zoom, pitch or follow writes.
+    cam->getCenterNode()->yaw(Ogre::Radian(delta), Ogre::Node::TS_WORLD);
+    cam->getCameraNode()->_getFullTransformUpdated(); // native rotationUpdate does this too
+    normalCameraYaw(cam, yawBeforeNative);
+    return true;
+}
+
+static void normalAutoAlignAfterUpdate(CameraClass* cam, float yawBeforeNative)
+{
+    float yawAfterNative;
+    if (!normalCameraYaw(cam, yawAfterNative)) { normalResetAutoAlign(); return; }
+    float manualDelta = otsWrapYaw(yawAfterNative - yawBeforeNative);
+    if (fabsf(manualDelta) > 0.00001f)
+    {
+        s_normalOverrideUntilMs = GetTickCount64() + s_normalManualOverrideMs;
+        if (s_normalMoveRefValid)
+            s_normalMoveRefYaw = otsWrapYaw(s_normalMoveRefYaw + manualDelta);
+    }
+}
+
 static void (*s_cameraUpdateOrig)(CameraClass* thisptr, bool controlEnabled);
 static void cameraUpdate_hook(CameraClass* thisptr, bool controlEnabled)
 {
@@ -6385,6 +6580,8 @@ static void cameraUpdate_hook(CameraClass* thisptr, bool controlEnabled)
     // (CameraClass::update consumes and zeroes mWheel in its own zoom).
     int otsWheelPre = key ? key->mWheel : 0;
 
+    float normalYawBeforeNative = 0.0f;
+    bool observeNormalRotation = normalAutoAlignBeforeUpdate(thisptr, controlEnabled, normalYawBeforeNative);
     s_cameraUpdateOrig(thisptr, ctlEnabled);
     manualAttackHudUpdate();    // "Manual Attack" label (self-gated)
     focusMarkersUpdate(thisptr);   // lock dot + weapon glints (self-gated)
@@ -6404,6 +6601,7 @@ static void cameraUpdate_hook(CameraClass* thisptr, bool controlEnabled)
     if (sceneFreeing)
     {
         otsResetAutoAlign();
+        normalResetAutoAlign();
         s_otsCamDistApplied = -1.0f;
         // Detached OTS: the scene/camera is being torn down — drop our state
         // WITHOUT touching the (freed) camera or node (mirrors the FP handling
@@ -6461,6 +6659,9 @@ static void cameraUpdate_hook(CameraClass* thisptr, bool controlEnabled)
     // cameras just return after orig and never touch s_fpActive/the node.
     if (!ou || !ou->player || thisptr != ou->player->camera)
         return;
+
+    if (observeNormalRotation)
+        normalAutoAlignAfterUpdate(thisptr, normalYawBeforeNative);
 
     // ANY open UI fully DISABLES the CTRL camera-rotate toggle (user req 2026-06-21
     // — simpler + robust): the moment a menu (dialogue, trade, loot, inventory,

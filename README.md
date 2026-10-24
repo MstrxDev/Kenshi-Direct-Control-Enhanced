@@ -105,6 +105,69 @@ Everything is easiest to change in-game under **Options → Direct Control**. Fo
   - `HeadPixelHide = 1`, `HideHeadgear = 1`, `HideHair = 1` — hide your own head, headgear, and hair. `HideHead = 0` is a legacy head hide for custom races.
   - `FloorRevealBelow = 1` — render the storeys below you inside multi-floor buildings.
 
+## Automatic alignment in the normal camera (V only)
+
+Normal-camera alignment is optional and **off by default**. To enable it, add or
+edit these entries under the existing `[Settings]` section in `WASDCombatPlugin.ini`,
+then restart the game:
+
+```ini
+[Settings]
+NormalAutoAlign = true
+NormalAutoAlignSpeed = 4.0
+NormalManualOverrideMs = 600
+```
+
+Press **V** to enable Direct Control and keep using Kenshi's normal camera.
+`NormalAutoAlignSpeed` is the turn response per second (0.1–20; higher turns
+faster). `NormalManualOverrideMs` is the delay after manual mouse or keyboard
+camera rotation before automatic turns resume (0–10000 ms). Holding a camera
+rotation control suppresses alignment even when this delay is zero. These
+settings are INI-only. Missing settings retain the disabled default; invalid
+numeric values use defaults and out-of-range values are clamped.
+
+The camera smoothly faces the character's measured horizontal travel, including
+point-and-click travel while Direct Control remains enabled. It stops rotating
+as soon as horizontal travel stops. While WASD keys remain held, automatic turns
+do not change their movement reference: holding A/D/S or a diagonal keeps the
+same world direction. Releasing all movement keys and pressing again adopts the
+current camera heading. Manual camera yaw adds the same intentional turn to the
+held-key reference.
+
+Alignment suspends during pause, loading, loss of game focus, incapacitation,
+protected animations, turret use and relevant UI (including inventory in
+move-through mode). Resuming or changing the controlled character re-seeds
+travel history. Very small movement, implausible jumps and long frame gaps do
+not trigger turns. The normal camera keeps its native pitch, zoom, orbit radius,
+cursor controls and follow target. **Ctrl** still selects the separate action
+camera, whose existing `OtsAutoAlign` settings remain independent. First person
+does not use normal-camera alignment.
+
+Implementation review: normal WASD obtains its heading from
+`CameraClass::getFacingDirection()`. Inspection of the local KenshiLib headers
+and the original executable retained by RE_Kenshi confirmed that native
+`rotationUpdate()` uses `getCenterNode()->yaw(..., Ogre::Node::TS_WORLD)`.
+Normal alignment uses that same exposed Ogre operation **before** the original
+camera update, so native follow, zoom, pitch and terrain/collision processing
+still run afterward. It does not detach the lens, write camera positions,
+change the follow target, add offsets or install any new hooks.
+`CameraClass::yaw/pitch` are transient rotation inputs consumed and cleared by
+the native update; normal alignment does not treat them as absolute orientation.
+
+Focused regression tests compile the production controller functions against
+fake game APIs with VC++ 2010 x64:
+
+```powershell
+uv run --no-project python tests/run_normal_camera_tests.py
+```
+
+These tests check movement feedback, smoothing, manual override, stationary and
+discontinuity handling, mode/UI/load/liveness gates, and default INI entries.
+They do not replace an in-game playtest. Before deploying, check V-only A/D/S
+and diagonal holds, manual MMB and rebound camera keys, wheel zoom and pitch,
+terrain/interior collision, inventory/map/dialogue/pause, character changes and
+save loading; then check Ctrl action camera, P first person and combat controls.
+
 ## Compatibility & Notes
 
 - Tested with RE_Kenshi 0.3.5 (Kenshi 1.0.65). No game data files are modified on disk, so it is safe alongside large mod lists and most combat, AI, and faction mods.
@@ -184,6 +247,15 @@ The plugin is a single C++ source file built as an x64 DLL against the RE_Kenshi
 1. Open `WASDCombatPlugin.sln` in Visual Studio (Desktop development with C++ workload).
 2. The project expects [KenshiLib](https://github.com/KenshiReclaimer/KenshiLib/) headers and libraries — either set the `KENSHILIB_DIR` environment variable, or place the [KenshiLib example dependencies](https://github.com/BFrizzleFoShizzle/KenshiLib_Examples_deps) (KenshiLib, Ogre, MyGUI, Boost 1.60) in a sibling `KenshiLib_Examples_deps` folder as referenced by the `.vcxproj`.
 3. Build **Release | x64**. Put the output `WASDCombatPlugin.dll` in `Kenshi/mods/WASDCombatPlugin/` alongside the `.ini`, `.mod`, `RE_Kenshi.json`, and the `materials` folder.
+
+The established command-line build uses VC++ 2010 with the Windows 7.1 SDK:
+
+```powershell
+& 'C:\Windows\Microsoft.NET\Framework64\v4.0.30319\MSBuild.exe' WASDCombatPlugin.sln /t:Build /p:Configuration=Release /p:Platform=x64 /p:PlatformToolset=Windows7.1SDK /v:minimal /nologo
+```
+
+This produces `WASDCombatPlugin/WASDCombatPlugin.dll` inside the development
+repository. The build does not deploy it to an installed mod.
 
 ## License
 
